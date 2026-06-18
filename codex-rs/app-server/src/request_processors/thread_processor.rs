@@ -1,9 +1,11 @@
 use super::*;
 use crate::error_code::method_not_found;
+use codex_app_server_protocol::DynamicToolCallOutputContentItem;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use serde_json::Value as JsonValue;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -137,6 +139,367 @@ fn collect_resume_override_mismatches(
         );
     }
     mismatch_details
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ThreadResumePayloadDiagnostics {
+    pub thread_turn_count: usize,
+    pub thread_item_count: usize,
+    pub initial_page_turn_count: usize,
+    pub initial_page_item_count: usize,
+    pub estimated_item_payload_bytes: usize,
+    pub item_class_counts: BTreeMap<&'static str, usize>,
+    pub largest_item_class: Option<&'static str>,
+    pub largest_item_estimated_bytes: usize,
+    pub user_image_input_count: usize,
+    pub image_item_count: usize,
+    pub tool_result_count: usize,
+    pub dynamic_tool_output_item_count: usize,
+    pub command_output_count: usize,
+}
+
+impl Default for ThreadResumePayloadDiagnostics {
+    fn default() -> Self {
+        Self {
+            thread_turn_count: 0,
+            thread_item_count: 0,
+            initial_page_turn_count: 0,
+            initial_page_item_count: 0,
+            estimated_item_payload_bytes: 0,
+            item_class_counts: BTreeMap::new(),
+            largest_item_class: None,
+            largest_item_estimated_bytes: 0,
+            user_image_input_count: 0,
+            image_item_count: 0,
+            tool_result_count: 0,
+            dynamic_tool_output_item_count: 0,
+            command_output_count: 0,
+        }
+    }
+}
+
+pub(super) fn collect_thread_resume_payload_diagnostics(
+    response: &ThreadResumeResponse,
+) -> ThreadResumePayloadDiagnostics {
+    let mut diagnostics = ThreadResumePayloadDiagnostics {
+        thread_turn_count: response.thread.turns.len(),
+        initial_page_turn_count: response
+            .initial_turns_page
+            .as_ref()
+            .map_or(0, |page| page.data.len()),
+        ..ThreadResumePayloadDiagnostics::default()
+    };
+
+    for turn in &response.thread.turns {
+        diagnostics.thread_item_count += turn.items.len();
+        collect_thread_items_payload_diagnostics(&turn.items, &mut diagnostics);
+    }
+    if let Some(page) = response.initial_turns_page.as_ref() {
+        for turn in &page.data {
+            diagnostics.initial_page_item_count += turn.items.len();
+            collect_thread_items_payload_diagnostics(&turn.items, &mut diagnostics);
+        }
+    }
+
+    diagnostics
+}
+
+pub(super) fn log_thread_resume_payload_diagnostics(
+    response: &ThreadResumeResponse,
+    include_turns: bool,
+    resume_source: &'static str,
+) {
+    let diagnostics = collect_thread_resume_payload_diagnostics(response);
+    tracing::info!(
+        target: "app_server::thread_resume",
+        thread_id = %response.thread.id,
+        resume_source,
+        include_turns,
+        has_initial_turns_page = response.initial_turns_page.is_some(),
+        thread_turn_count = diagnostics.thread_turn_count,
+        thread_item_count = diagnostics.thread_item_count,
+        initial_page_turn_count = diagnostics.initial_page_turn_count,
+        initial_page_item_count = diagnostics.initial_page_item_count,
+        estimated_item_payload_bytes = diagnostics.estimated_item_payload_bytes,
+        item_class_counts = ?diagnostics.item_class_counts,
+        largest_item_class = ?diagnostics.largest_item_class,
+        largest_item_estimated_bytes = diagnostics.largest_item_estimated_bytes,
+        user_image_input_count = diagnostics.user_image_input_count,
+        image_item_count = diagnostics.image_item_count,
+        tool_result_count = diagnostics.tool_result_count,
+        dynamic_tool_output_item_count = diagnostics.dynamic_tool_output_item_count,
+        command_output_count = diagnostics.command_output_count,
+        "thread/resume response payload diagnostics"
+    );
+}
+
+fn collect_thread_items_payload_diagnostics(
+    items: &[ThreadItem],
+    diagnostics: &mut ThreadResumePayloadDiagnostics,
+) {
+    for item in items {
+        let item_class = thread_item_class(item);
+        *diagnostics.item_class_counts.entry(item_class).or_default() += 1;
+        let item_estimated_bytes = estimate_thread_item_payload_bytes(item);
+        diagnostics.estimated_item_payload_bytes += item_estimated_bytes;
+        if item_estimated_bytes > diagnostics.largest_item_estimated_bytes {
+            diagnostics.largest_item_class = Some(item_class);
+            diagnostics.largest_item_estimated_bytes = item_estimated_bytes;
+        }
+        accumulate_thread_item_signal_counts(item, diagnostics);
+    }
+}
+
+fn thread_item_class(item: &ThreadItem) -> &'static str {
+    match item {
+        ThreadItem::UserMessage { .. } => "user_message",
+        ThreadItem::HookPrompt { .. } => "hook_prompt",
+        ThreadItem::AgentMessage { .. } => "agent_message",
+        ThreadItem::Plan { .. } => "plan",
+        ThreadItem::Reasoning { .. } => "reasoning",
+        ThreadItem::CommandExecution { .. } => "command_execution",
+        ThreadItem::FileChange { .. } => "file_change",
+        ThreadItem::McpToolCall { .. } => "mcp_tool_call",
+        ThreadItem::DynamicToolCall { .. } => "dynamic_tool_call",
+        ThreadItem::CollabAgentToolCall { .. } => "collab_agent_tool_call",
+        ThreadItem::SubAgentActivity { .. } => "sub_agent_activity",
+        ThreadItem::WebSearch { .. } => "web_search",
+        ThreadItem::ImageView { .. } => "image_view",
+        ThreadItem::Sleep { .. } => "sleep",
+        ThreadItem::ImageGeneration { .. } => "image_generation",
+        ThreadItem::EnteredReviewMode { .. } => "entered_review_mode",
+        ThreadItem::ExitedReviewMode { .. } => "exited_review_mode",
+        ThreadItem::ContextCompaction { .. } => "context_compaction",
+    }
+}
+
+fn accumulate_thread_item_signal_counts(
+    item: &ThreadItem,
+    diagnostics: &mut ThreadResumePayloadDiagnostics,
+) {
+    match item {
+        ThreadItem::UserMessage { content, .. } => {
+            diagnostics.user_image_input_count += content
+                .iter()
+                .filter(|input| {
+                    matches!(
+                        input,
+                        V2UserInput::Image { .. } | V2UserInput::LocalImage { .. }
+                    )
+                })
+                .count();
+        }
+        ThreadItem::ImageView { .. } | ThreadItem::ImageGeneration { .. } => {
+            diagnostics.image_item_count += 1;
+        }
+        ThreadItem::CommandExecution {
+            aggregated_output, ..
+        } => {
+            if aggregated_output.is_some() {
+                diagnostics.command_output_count += 1;
+            }
+        }
+        ThreadItem::McpToolCall { result, error, .. } => {
+            if result.is_some() || error.is_some() {
+                diagnostics.tool_result_count += 1;
+            }
+        }
+        ThreadItem::DynamicToolCall { content_items, .. } => {
+            let output_item_count = content_items.as_ref().map_or(0, Vec::len);
+            diagnostics.dynamic_tool_output_item_count += output_item_count;
+            diagnostics.user_image_input_count += content_items
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| matches!(item, DynamicToolCallOutputContentItem::InputImage { .. }))
+                .count();
+        }
+        ThreadItem::HookPrompt { .. }
+        | ThreadItem::AgentMessage { .. }
+        | ThreadItem::Plan { .. }
+        | ThreadItem::Reasoning { .. }
+        | ThreadItem::FileChange { .. }
+        | ThreadItem::CollabAgentToolCall { .. }
+        | ThreadItem::SubAgentActivity { .. }
+        | ThreadItem::WebSearch { .. }
+        | ThreadItem::Sleep { .. }
+        | ThreadItem::EnteredReviewMode { .. }
+        | ThreadItem::ExitedReviewMode { .. }
+        | ThreadItem::ContextCompaction { .. } => {}
+    }
+}
+
+fn estimate_thread_item_payload_bytes(item: &ThreadItem) -> usize {
+    match item {
+        ThreadItem::UserMessage {
+            id,
+            client_id,
+            content,
+        } => {
+            id.len()
+                + client_id.as_ref().map_or(0, String::len)
+                + content
+                    .iter()
+                    .map(estimate_user_input_payload_bytes)
+                    .sum::<usize>()
+        }
+        ThreadItem::HookPrompt { id, fragments } => {
+            id.len()
+                + fragments
+                    .iter()
+                    .map(|fragment| fragment.text.len() + fragment.hook_run_id.len())
+                    .sum::<usize>()
+        }
+        ThreadItem::AgentMessage { id, text, .. } => id.len() + text.len(),
+        ThreadItem::Plan { id, text } => id.len() + text.len(),
+        ThreadItem::Reasoning {
+            id,
+            summary,
+            content,
+        } => {
+            id.len()
+                + summary.iter().map(String::len).sum::<usize>()
+                + content.iter().map(String::len).sum::<usize>()
+        }
+        ThreadItem::CommandExecution {
+            id,
+            command,
+            cwd,
+            process_id,
+            command_actions,
+            aggregated_output,
+            ..
+        } => {
+            id.len()
+                + command.len()
+                + cwd.as_str().len()
+                + process_id.as_ref().map_or(0, String::len)
+                + command_actions
+                    .iter()
+                    .map(|action| format!("{action:?}").len())
+                    .sum::<usize>()
+                + aggregated_output.as_ref().map_or(0, String::len)
+        }
+        ThreadItem::FileChange { id, changes, .. } => id.len() + changes.len(),
+        ThreadItem::McpToolCall {
+            id,
+            server,
+            tool,
+            arguments,
+            result,
+            error,
+            mcp_app_resource_uri,
+            plugin_id,
+            ..
+        } => {
+            id.len()
+                + server.len()
+                + tool.len()
+                + estimate_json_payload_bytes(arguments)
+                + mcp_app_resource_uri.as_ref().map_or(0, String::len)
+                + plugin_id.as_ref().map_or(0, String::len)
+                + result
+                    .as_ref()
+                    .map_or(0, |result| format!("{result:?}").len())
+                + error.as_ref().map_or(0, |error| format!("{error:?}").len())
+        }
+        ThreadItem::DynamicToolCall {
+            id,
+            namespace,
+            tool,
+            arguments,
+            content_items,
+            ..
+        } => {
+            id.len()
+                + namespace.as_ref().map_or(0, String::len)
+                + tool.len()
+                + estimate_json_payload_bytes(arguments)
+                + content_items
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(estimate_dynamic_tool_output_payload_bytes)
+                    .sum::<usize>()
+        }
+        ThreadItem::CollabAgentToolCall {
+            id,
+            sender_thread_id,
+            receiver_thread_ids,
+            prompt,
+            model,
+            agents_states,
+            ..
+        } => {
+            id.len()
+                + sender_thread_id.len()
+                + receiver_thread_ids.iter().map(String::len).sum::<usize>()
+                + prompt.as_ref().map_or(0, String::len)
+                + model.as_ref().map_or(0, String::len)
+                + agents_states.len()
+        }
+        ThreadItem::SubAgentActivity {
+            id,
+            agent_thread_id,
+            agent_path,
+            ..
+        } => id.len() + agent_thread_id.len() + agent_path.len(),
+        ThreadItem::WebSearch { id, query, .. } => id.len() + query.len(),
+        ThreadItem::ImageView { id, path } => id.len() + path.as_path().as_os_str().len(),
+        ThreadItem::Sleep { id, .. } => id.len(),
+        ThreadItem::ImageGeneration {
+            id,
+            status,
+            revised_prompt,
+            result,
+            saved_path,
+        } => {
+            id.len()
+                + status.len()
+                + revised_prompt.as_ref().map_or(0, String::len)
+                + result.len()
+                + saved_path
+                    .as_ref()
+                    .map_or(0, |path| path.as_path().as_os_str().len())
+        }
+        ThreadItem::EnteredReviewMode { id, review }
+        | ThreadItem::ExitedReviewMode { id, review } => id.len() + review.len(),
+        ThreadItem::ContextCompaction { id } => id.len(),
+    }
+}
+
+fn estimate_user_input_payload_bytes(input: &V2UserInput) -> usize {
+    match input {
+        V2UserInput::Text {
+            text,
+            text_elements,
+        } => text.len() + text_elements.len(),
+        V2UserInput::Image { url, .. } => url.len(),
+        V2UserInput::LocalImage { path, .. } => path.as_os_str().len(),
+        V2UserInput::Skill { name, path } => name.len() + path.as_os_str().len(),
+        V2UserInput::Mention { name, path } => name.len() + path.len(),
+    }
+}
+
+fn estimate_dynamic_tool_output_payload_bytes(item: &DynamicToolCallOutputContentItem) -> usize {
+    match item {
+        DynamicToolCallOutputContentItem::InputText { text } => text.len(),
+        DynamicToolCallOutputContentItem::InputImage { image_url } => image_url.len(),
+    }
+}
+
+fn estimate_json_payload_bytes(value: &JsonValue) -> usize {
+    match value {
+        JsonValue::Null => 4,
+        JsonValue::Bool(_) => 5,
+        JsonValue::Number(number) => number.to_string().len(),
+        JsonValue::String(string) => string.len(),
+        JsonValue::Array(values) => values.iter().map(estimate_json_payload_bytes).sum(),
+        JsonValue::Object(map) => map
+            .iter()
+            .map(|(key, value)| key.len() + estimate_json_payload_bytes(value))
+            .sum(),
+    }
 }
 
 fn merge_persisted_resume_metadata(
@@ -2778,6 +3141,7 @@ impl ThreadRequestProcessor {
                     initial_turns_page,
                 };
 
+                log_thread_resume_payload_diagnostics(&response, include_turns, "cold");
                 let connection_id = request_id.connection_id;
                 self.outgoing.send_response(request_id, response).await;
                 // `excludeTurns` is explicitly the cheap resume path, so avoid
@@ -2790,6 +3154,7 @@ impl ThreadRequestProcessor {
                     // The client needs restored usage before it starts another turn.
                     // Sending after the response preserves JSON-RPC request ordering while
                     // still filling the status line before the next turn lifecycle begins.
+                    let token_usage_replay_started_at = std::time::Instant::now();
                     send_thread_token_usage_update_to_connection(
                         &self.outgoing,
                         connection_id,
@@ -2799,6 +3164,12 @@ impl ThreadRequestProcessor {
                         token_usage_turn_id,
                     )
                     .await;
+                    tracing::info!(
+                        target: "app_server::thread_resume",
+                        thread_id = %thread_id,
+                        elapsed_ms = token_usage_replay_started_at.elapsed().as_millis(),
+                        "thread/resume token usage replay completed"
+                    );
                 }
                 self.thread_goal_processor
                     .emit_resume_goal_snapshot_and_continue(thread_id, codex_thread.as_ref())

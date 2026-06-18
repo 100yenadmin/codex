@@ -36,6 +36,171 @@ mod thread_list_cwd_filter_tests {
     }
 }
 
+mod thread_resume_payload_diagnostics_tests {
+    use super::super::collect_thread_resume_payload_diagnostics;
+    use codex_app_server_protocol::ApprovalsReviewer;
+    use codex_app_server_protocol::AskForApproval;
+    use codex_app_server_protocol::DynamicToolCallOutputContentItem;
+    use codex_app_server_protocol::SandboxPolicy;
+    use codex_app_server_protocol::SessionSource;
+    use codex_app_server_protocol::Thread;
+    use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadResumeResponse;
+    use codex_app_server_protocol::ThreadStatus;
+    use codex_app_server_protocol::Turn;
+    use codex_app_server_protocol::TurnItemsView;
+    use codex_app_server_protocol::TurnStatus;
+    use codex_app_server_protocol::TurnsPage;
+    use codex_app_server_protocol::UserInput;
+    use codex_utils_absolute_path::AbsolutePathBuf;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn resume_payload_diagnostics_count_shape_without_content() {
+        let response = ThreadResumeResponse {
+            thread: thread_with_turns(vec![turn(
+                "turn-body",
+                vec![
+                    ThreadItem::UserMessage {
+                        id: "user-1".to_string(),
+                        client_id: None,
+                        content: vec![
+                            UserInput::Text {
+                                text: "hello".to_string(),
+                                text_elements: Vec::new(),
+                            },
+                            UserInput::Image {
+                                detail: None,
+                                url: "data:image/png;base64,abc".to_string(),
+                            },
+                        ],
+                    },
+                    ThreadItem::McpToolCall {
+                        id: "mcp-1".to_string(),
+                        server: "server".to_string(),
+                        tool: "tool".to_string(),
+                        status: codex_app_server_protocol::McpToolCallStatus::Completed,
+                        arguments: json!({"path": "redacted"}),
+                        mcp_app_resource_uri: None,
+                        plugin_id: None,
+                        result: Some(Box::new(codex_app_server_protocol::McpToolCallResult {
+                            content: Vec::new(),
+                            structured_content: None,
+                            meta: None,
+                        })),
+                        error: None,
+                        duration_ms: None,
+                    },
+                ],
+            )]),
+            model: "gpt-5".to_string(),
+            model_provider: "openai".to_string(),
+            service_tier: None,
+            cwd: abs_tmp(),
+            runtime_workspace_roots: Vec::new(),
+            instruction_sources: Vec::new(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: ApprovalsReviewer::User,
+            sandbox: SandboxPolicy::DangerFullAccess,
+            active_permission_profile: None,
+            reasoning_effort: None,
+            initial_turns_page: Some(TurnsPage {
+                data: vec![turn(
+                    "turn-page",
+                    vec![
+                        ThreadItem::ImageView {
+                            id: "image-1".to_string(),
+                            path: abs_tmp(),
+                        },
+                        ThreadItem::DynamicToolCall {
+                            id: "dynamic-1".to_string(),
+                            namespace: Some("ns".to_string()),
+                            tool: "tool".to_string(),
+                            arguments: json!({"query": "redacted"}),
+                            status: codex_app_server_protocol::DynamicToolCallStatus::Completed,
+                            content_items: Some(vec![
+                                DynamicToolCallOutputContentItem::InputText {
+                                    text: "result".to_string(),
+                                },
+                                DynamicToolCallOutputContentItem::InputImage {
+                                    image_url: "data:image/png;base64,xyz".to_string(),
+                                },
+                            ]),
+                            success: Some(true),
+                            duration_ms: None,
+                        },
+                    ],
+                )],
+                next_cursor: Some("older".to_string()),
+                backwards_cursor: Some("newer".to_string()),
+            }),
+        };
+
+        let diagnostics = collect_thread_resume_payload_diagnostics(&response);
+
+        assert_eq!(diagnostics.thread_turn_count, 1);
+        assert_eq!(diagnostics.thread_item_count, 2);
+        assert_eq!(diagnostics.initial_page_turn_count, 1);
+        assert_eq!(diagnostics.initial_page_item_count, 2);
+        assert_eq!(diagnostics.user_image_input_count, 2);
+        assert_eq!(diagnostics.image_item_count, 1);
+        assert_eq!(diagnostics.tool_result_count, 1);
+        assert_eq!(diagnostics.dynamic_tool_output_item_count, 2);
+        assert!(diagnostics.estimated_item_payload_bytes > 0);
+        assert!(diagnostics.largest_item_class.is_some());
+        assert_eq!(diagnostics.item_class_counts.get("user_message"), Some(&1));
+        assert_eq!(
+            diagnostics.item_class_counts.get("dynamic_tool_call"),
+            Some(&1)
+        );
+    }
+
+    fn thread_with_turns(turns: Vec<Turn>) -> Thread {
+        Thread {
+            id: "thread-1".to_string(),
+            session_id: "session-1".to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            preview: String::new(),
+            ephemeral: false,
+            model_provider: "openai".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            recency_at: Some(1),
+            status: ThreadStatus::Idle,
+            path: None,
+            cwd: abs_tmp(),
+            cli_version: "0.0.0".to_string(),
+            source: SessionSource::Cli,
+            thread_source: None,
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns,
+        }
+    }
+
+    fn turn(id: &str, items: Vec<ThreadItem>) -> Turn {
+        Turn {
+            id: id.to_string(),
+            items_view: TurnItemsView::Full,
+            items,
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        }
+    }
+
+    fn abs_tmp() -> AbsolutePathBuf {
+        AbsolutePathBuf::from_absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" })
+            .expect("absolute test path")
+    }
+}
+
 mod background_terminal_pagination_tests {
     use super::super::paginate_background_terminals;
     use codex_app_server_protocol::ThreadBackgroundTerminal;

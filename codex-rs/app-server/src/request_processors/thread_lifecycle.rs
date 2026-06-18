@@ -663,6 +663,11 @@ pub(super) async fn handle_pending_thread_resume_request(
         reasoning_effort,
         initial_turns_page,
     };
+    super::thread_processor::log_thread_resume_payload_diagnostics(
+        &response,
+        pending.include_turns,
+        "running",
+    );
     outgoing.send_response(request_id, response).await;
     // Match cold resume: metadata-only resume should attach the listener without
     // paying the cost of turn reconstruction for historical usage replay.
@@ -673,6 +678,7 @@ pub(super) async fn handle_pending_thread_resume_request(
         );
         // Rejoining a loaded thread has the same UI contract as a cold resume, but
         // uses the live conversation state instead of reconstructing a new session.
+        let token_usage_replay_started_at = Instant::now();
         send_thread_token_usage_update_to_connection(
             outgoing,
             connection_id,
@@ -682,6 +688,12 @@ pub(super) async fn handle_pending_thread_resume_request(
             token_usage_turn_id,
         )
         .await;
+        tracing::info!(
+            target: "app_server::thread_resume",
+            thread_id = %conversation_id,
+            elapsed_ms = token_usage_replay_started_at.elapsed().as_millis(),
+            "thread/resume token usage replay completed"
+        );
     }
     if pending.emit_thread_goal_update {
         if let Some(state_db) = pending.thread_goal_state_db {
