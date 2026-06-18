@@ -7,6 +7,7 @@ import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
 import type { SandboxPolicy } from "./SandboxPolicy";
 import type { Thread } from "./Thread";
+import type { TurnsPage } from "./TurnsPage";
 
 export type ThreadResumeResponse = {thread: Thread, model: string, modelProvider: string, serviceTier: string | null, cwd: AbsolutePathBuf, /**
  * Instruction source files currently loaded for this thread.
@@ -18,4 +19,7 @@ approvalsReviewer: ApprovalsReviewer, /**
  * Legacy sandbox policy retained for compatibility. Experimental clients
  * should prefer `activePermissionProfile` for profile provenance.
  */
-sandbox: SandboxPolicy, reasoningEffort: ReasoningEffort | null};
+sandbox: SandboxPolicy, reasoningEffort: ReasoningEffort | null, /**
+ * `thread/turns/list` page returned when requested by `initialTurnsPage`.
+ */
+initialTurnsPage: TurnsPage | null};

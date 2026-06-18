@@ -2358,6 +2358,18 @@
     "cwd": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },
+    "initialTurnsPage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TurnsPage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "`thread/turns/list` page returned when requested by `initialTurnsPage`."
+    },
     "instructionSources": {
       "default": [],
       "description": "Instruction source files currently loaded for this thread.",

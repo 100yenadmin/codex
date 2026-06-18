@@ -1307,6 +1307,21 @@
         "null"
       ]
     },
+    "excludeTurns": {
+      "description": "When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming.",
+      "type": "boolean"
+    },
+    "initialTurnsPage": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadResumeInitialTurnsPageParams"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "When present, include a `thread/turns/list` page in the resume response so clients can bootstrap recent turns without a second request."
+    },
     "model": {
       "description": "Configuration overrides for the resumed thread, if any.",
       "type": [

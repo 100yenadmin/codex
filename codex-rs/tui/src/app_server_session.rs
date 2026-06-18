@@ -47,6 +47,7 @@ use codex_app_server_protocol::ReviewStartResponse;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
@@ -81,6 +82,7 @@ use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadResumeInitialTurnsPageParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRollbackParams;
@@ -102,6 +104,7 @@ use codex_app_server_protocol::ThreadUnsubscribeResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
+use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
@@ -136,6 +139,7 @@ const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
 pub(crate) const EXTERNAL_AGENT_CONFIG_IMPORT_IN_PROGRESS_MESSAGE: &str =
     "A previous Claude Code import is still running. Wait for it to finish before importing again.";
 const THREAD_SETTINGS_UPDATE_METHOD: &str = "thread/settings/update";
+const TUI_RESUME_INITIAL_TURNS_LIMIT: u32 = 100;
 
 fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> color_eyre::Report {
     color_eyre::eyre::eyre!("{context}: {err}")
@@ -1432,6 +1436,12 @@ fn thread_resume_params_from_config(
         sandbox,
         permissions,
         config: config_request_overrides_from_config(&config),
+        exclude_turns: true,
+        initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
+            limit: Some(TUI_RESUME_INITIAL_TURNS_LIMIT),
+            sort_direction: Some(SortDirection::Desc),
+            items_view: Some(TurnItemsView::Full),
+        }),
         developer_instructions: with_terminal_visualization_instructions(
             &config, /*control_instructions*/ None,
         ),
@@ -1515,10 +1525,24 @@ async fn started_thread_from_resume_response(
         thread_session_state_from_thread_resume_response(&response, config, thread_params_mode)
             .await
             .map_err(color_eyre::eyre::Report::msg)?;
-    Ok(AppServerStartedThread {
-        session,
-        turns: response.thread.turns,
-    })
+    let turns = resume_response_bootstrap_turns(&response);
+    Ok(AppServerStartedThread { session, turns })
+}
+
+fn resume_response_bootstrap_turns(response: &ThreadResumeResponse) -> Vec<Turn> {
+    if !response.thread.turns.is_empty() {
+        return response.thread.turns.clone();
+    }
+
+    let Some(page) = response.initial_turns_page.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut turns = page.data.clone();
+    // TUI bootstrap requests the latest page in descending order to avoid
+    // materializing full history. Replay still expects chronological order.
+    turns.reverse();
+    turns
 }
 
 async fn started_thread_from_fork_response(
@@ -2005,6 +2029,15 @@ mod tests {
         assert_eq!(start.cwd, None);
         assert_eq!(resume.cwd, None);
         assert_eq!(fork.cwd, None);
+        assert!(resume.exclude_turns);
+        assert_eq!(
+            resume.initial_turns_page,
+            Some(ThreadResumeInitialTurnsPageParams {
+                limit: Some(TUI_RESUME_INITIAL_TURNS_LIMIT),
+                sort_direction: Some(SortDirection::Desc),
+                items_view: Some(TurnItemsView::Full),
+            })
+        );
         assert_eq!(
             start.runtime_workspace_roots,
             expected_runtime_workspace_roots
@@ -2398,6 +2431,22 @@ mod tests {
         assert_eq!(started.session.permission_profile, read_only_profile);
         assert_eq!(started.turns.len(), 1);
         assert_eq!(started.turns[0], response.thread.turns[0]);
+
+        let mut paged_response = response.clone();
+        let older_turn = response.thread.turns[0].clone();
+        let mut latest_turn = older_turn.clone();
+        latest_turn.id = "turn-2".to_string();
+        paged_response.thread.turns = Vec::new();
+        paged_response.initial_turns_page = Some(codex_app_server_protocol::TurnsPage {
+            data: vec![latest_turn.clone(), older_turn.clone()],
+            next_cursor: Some("older-page".to_string()),
+            backwards_cursor: Some("latest-page".to_string()),
+        });
+        let started =
+            started_thread_from_resume_response(paged_response, &config, ThreadParamsMode::Remote)
+                .await
+                .expect("paged resume response should map");
+        assert_eq!(started.turns, vec![older_turn, latest_turn]);
 
         let embedded_config = ConfigBuilder::default()
             .codex_home(temp_dir.path().join("embedded-codex-home"))
