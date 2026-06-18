@@ -26,6 +26,7 @@ use crate::list::ThreadSortKey;
 use crate::list::ThreadsPage;
 use crate::list::get_threads;
 use crate::list::read_head_for_summary;
+use crate::read_thread_item_from_rollout;
 use crate::rollout_date_parts;
 use anyhow::Result;
 use codex_protocol::ThreadId;
@@ -1344,6 +1345,51 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
     let now = chrono::Utc::now();
     let age = now - updated;
     assert!(age.num_seconds().abs() < 30);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_read_thread_item_from_rollout_uses_file_mtime() -> Result<()> {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+
+    let ts = "2025-06-01T08-00-00";
+    let uuid = Uuid::from_u128(44);
+    write_session_file(
+        home,
+        ts,
+        uuid,
+        /*num_records*/ 0,
+        Some(SessionSource::VSCode),
+    )
+    .unwrap();
+
+    let created = PrimitiveDateTime::parse(
+        ts,
+        format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]"),
+    )?
+    .assume_utc();
+    let updated = created + Duration::hours(3);
+    let expected_updated = updated.format(&time::format_description::well_known::Rfc3339)?;
+
+    let file_path = home
+        .join("sessions")
+        .join("2025")
+        .join("06")
+        .join("01")
+        .join(format!("rollout-{ts}-{uuid}.jsonl"));
+    let file = std::fs::OpenOptions::new().write(true).open(&file_path)?;
+    let times = FileTimes::new().set_modified(updated.into());
+    file.set_times(times)?;
+
+    let item = read_thread_item_from_rollout(file_path)
+        .await
+        .expect("thread item");
+
+    assert_eq!(item.created_at.as_deref(), Some(ts));
+    assert_eq!(item.updated_at.as_deref(), Some(expected_updated.as_str()));
+    assert_eq!(item.recency_at.as_deref(), Some(expected_updated.as_str()));
 
     Ok(())
 }

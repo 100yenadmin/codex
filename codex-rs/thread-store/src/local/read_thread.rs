@@ -55,7 +55,9 @@ pub(super) async fn read_thread(
             && (params.include_archived || rollout_thread.archived_at.is_none())
             && !rollout_thread.preview.is_empty()
         {
+            rollout_thread.updated_at = thread.updated_at;
             rollout_thread.recency_at = thread.recency_at;
+            rollout_thread.archived_at = thread.archived_at;
             if thread.name.is_some() {
                 rollout_thread.name = thread.name;
             }
@@ -116,7 +118,9 @@ pub(super) async fn read_thread_by_rollout_path(
         });
     }
     if let Some(metadata) = read_sqlite_metadata(store, thread.thread_id).await {
+        thread.updated_at = metadata.updated_at;
         thread.recency_at = metadata.recency_at;
+        thread.archived_at = metadata.archived_at;
         let existing_git_info = thread.git_info.take();
         let (fallback_sha, fallback_branch, fallback_origin_url) = match existing_git_info {
             Some(info) => (
@@ -450,6 +454,7 @@ fn parse_rfc3339_non_optional(value: &str) -> Option<DateTime<Utc>> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::FileTimes;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -551,9 +556,13 @@ mod tests {
         );
         builder.model_provider = Some(config.default_model_provider_id.clone());
         builder.git_branch = Some("sqlite-branch".to_string());
+        let updated_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T12:00:00Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
         let recency_at = chrono::DateTime::parse_from_rfc3339("2026-01-03T12:00:00Z")
             .expect("timestamp should parse")
             .with_timezone(&Utc);
+        builder.updated_at = Some(updated_at);
         builder.recency_at = Some(recency_at);
         runtime
             .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
@@ -570,6 +579,7 @@ mod tests {
             .expect("read thread by rollout path");
 
         let git_info = thread.git_info.expect("git info should be present");
+        assert_eq!(thread.updated_at, updated_at);
         assert_eq!(thread.recency_at, recency_at);
         assert_eq!(git_info.branch.as_deref(), Some("sqlite-branch"));
         assert_eq!(
@@ -580,6 +590,59 @@ mod tests {
             git_info.repository_url.as_deref(),
             Some("https://example.com/repo.git")
         );
+    }
+
+    #[tokio::test]
+    async fn read_thread_preserves_sqlite_freshness_when_using_rollout_preview() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(224);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let active_path =
+            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
+        let rollout_updated_at = parse_rfc3339_non_optional("2025-01-03T13:00:00Z").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&active_path)
+            .expect("open rollout file");
+        file.set_times(FileTimes::new().set_modified(rollout_updated_at.into()))
+            .expect("set rollout mtime");
+
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite_home.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let sqlite_updated_at = parse_rfc3339_non_optional("2026-01-03T12:34:56Z").unwrap();
+        let sqlite_recency_at = parse_rfc3339_non_optional("2026-01-04T12:34:56Z").unwrap();
+        let mut builder = ThreadMetadataBuilder::new(
+            thread_id,
+            active_path.clone(),
+            parse_rfc3339_non_optional("2025-01-03T12:00:00Z").unwrap(),
+            SessionSource::Cli,
+        );
+        builder.updated_at = Some(sqlite_updated_at);
+        builder.recency_at = Some(sqlite_recency_at);
+        builder.model_provider = Some(config.default_model_provider_id.clone());
+        runtime
+            .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
+            .await
+            .expect("state db upsert should succeed");
+
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read thread");
+
+        assert_eq!(thread.preview, "Hello from user");
+        assert_eq!(thread.updated_at, sqlite_updated_at);
+        assert_eq!(thread.recency_at, sqlite_recency_at);
     }
 
     #[tokio::test]

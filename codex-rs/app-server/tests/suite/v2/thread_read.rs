@@ -67,6 +67,7 @@ use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::fs::FileTimes;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -102,6 +103,39 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+    let active_rollout_path =
+        rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
+    let rollout_updated_at =
+        chrono::DateTime::parse_from_rfc3339("2025-01-05T13:00:00Z")?.with_timezone(&chrono::Utc);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&active_rollout_path)?;
+    file.set_times(FileTimes::new().set_modified(rollout_updated_at.into()))?;
+    let sqlite_updated_at =
+        chrono::DateTime::parse_from_rfc3339("2026-01-05T12:34:56Z")?.with_timezone(&chrono::Utc);
+    let sqlite_recency_at =
+        chrono::DateTime::parse_from_rfc3339("2026-01-06T12:34:56Z")?.with_timezone(&chrono::Utc);
+    let state_db = codex_state::StateRuntime::init(
+        codex_home.path().to_path_buf(),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+    let thread_id = codex_protocol::ThreadId::from_string(&conversation_id)?;
+    let mut metadata = codex_state::ThreadMetadataBuilder::new(
+        thread_id,
+        active_rollout_path,
+        chrono::DateTime::parse_from_rfc3339("2025-01-05T12:00:00Z")?.with_timezone(&chrono::Utc),
+        ProtocolSessionSource::Cli,
+    );
+    metadata.updated_at = Some(sqlite_updated_at);
+    metadata.recency_at = Some(sqlite_recency_at);
+    metadata.model_provider = Some("mock_provider".to_string());
+    state_db
+        .upsert_thread(&metadata.build("mock_provider"))
+        .await?;
 
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -128,6 +162,8 @@ async fn thread_read_returns_summary_without_turns() -> Result<()> {
     assert_eq!(thread.cli_version, "0.0.0");
     assert_eq!(thread.source, SessionSource::Cli);
     assert_eq!(thread.git_info, None);
+    assert_eq!(thread.updated_at, sqlite_updated_at.timestamp());
+    assert_eq!(thread.recency_at, Some(sqlite_recency_at.timestamp()));
     assert_eq!(thread.turns.len(), 0);
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
 
