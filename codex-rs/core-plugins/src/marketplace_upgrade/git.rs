@@ -17,27 +17,41 @@ pub(super) fn git_remote_revision(
     }
 
     let ref_name = ref_name.unwrap_or("HEAD");
+    let peeled_ref_name = format!("{ref_name}^{{}}");
     let output = run_git_command_with_timeout(
-        git_command().arg("ls-remote").arg(source).arg(ref_name),
+        git_command()
+            .arg("ls-remote")
+            .arg(source)
+            .arg(ref_name)
+            .arg(peeled_ref_name),
         "git ls-remote marketplace source",
         timeout,
     )?;
     ensure_git_success(&output, "git ls-remote marketplace source")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(first_line) = stdout.lines().next() else {
-        return Err("git ls-remote returned empty output for marketplace source".to_string());
-    };
-    let Some((revision, _)) = first_line.split_once('\t') else {
-        return Err(format!(
-            "unexpected git ls-remote output for marketplace source: {first_line}"
-        ));
-    };
-    let revision = revision.trim();
-    if revision.is_empty() {
-        return Err("git ls-remote returned empty revision for marketplace source".to_string());
+    parse_git_ls_remote_revision(&stdout)
+}
+
+fn parse_git_ls_remote_revision(stdout: &str) -> Result<String, String> {
+    let mut first_revision = None;
+    for line in stdout.lines() {
+        let Some((revision, reference)) = line.split_once('\t') else {
+            return Err(format!(
+                "unexpected git ls-remote output for marketplace source: {line}"
+            ));
+        };
+        let revision = revision.trim();
+        if revision.is_empty() {
+            return Err("git ls-remote returned empty revision for marketplace source".to_string());
+        }
+        first_revision.get_or_insert_with(|| revision.to_string());
+        if reference.trim().ends_with("^{}") {
+            return Ok(revision.to_string());
+        }
     }
-    Ok(revision.to_string())
+    first_revision
+        .ok_or_else(|| "git ls-remote returned empty output for marketplace source".to_string())
 }
 
 pub(super) fn clone_git_source(
@@ -225,6 +239,7 @@ fn ensure_git_success(output: &Output, context: &str) -> Result<(), String> {
 mod tests {
     use super::git_command;
     use super::is_full_git_sha;
+    use super::parse_git_ls_remote_revision;
     use super::strip_windows_verbatim_path_prefix;
     use pretty_assertions::assert_eq;
     use std::ffi::OsStr;
@@ -234,6 +249,29 @@ mod tests {
         assert!(is_full_git_sha("0123456789abcdef0123456789abcdef01234567"));
         assert!(!is_full_git_sha("main"));
         assert!(!is_full_git_sha("0123456"));
+    }
+
+    #[test]
+    fn remote_revision_prefers_peeled_annotated_tag() {
+        let output = concat!(
+            "0c7a0df5d351306392958f37ba80d590070a318d\trefs/tags/electric/v1.6.10-electric.2\n",
+            "e690cabf19dea108fced6ee1a7ef17e9e623ec54\trefs/tags/electric/v1.6.10-electric.2^{}\n",
+        );
+
+        assert_eq!(
+            parse_git_ls_remote_revision(output),
+            Ok("e690cabf19dea108fced6ee1a7ef17e9e623ec54".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_revision_uses_direct_ref_when_no_peeled_ref_exists() {
+        let output = "e690cabf19dea108fced6ee1a7ef17e9e623ec54\trefs/heads/main\n";
+
+        assert_eq!(
+            parse_git_ls_remote_revision(output),
+            Ok("e690cabf19dea108fced6ee1a7ef17e9e623ec54".to_string())
+        );
     }
 
     #[test]
