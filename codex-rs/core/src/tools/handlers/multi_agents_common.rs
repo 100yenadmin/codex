@@ -14,12 +14,15 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
@@ -338,7 +341,40 @@ pub(crate) fn apply_spawn_agent_depth_authority_policy(
         let parent_permission_profile = turn.permission_profile();
         let permission_profile = match permission_profile {
             codex_config::config_toml::AgentDepthPermissionProfileToml::ReadOnly => {
-                PermissionProfile::read_only()
+                match parent_permission_profile {
+                    PermissionProfile::Disabled => PermissionProfile::read_only(),
+                    PermissionProfile::Managed {
+                        file_system: ManagedFileSystemPermissions::Unrestricted,
+                        ..
+                    } => PermissionProfile::read_only(),
+                    PermissionProfile::Managed {
+                        file_system:
+                            ManagedFileSystemPermissions::Restricted {
+                                entries,
+                                glob_scan_max_depth,
+                            },
+                        ..
+                    } => {
+                        let mut entries = entries;
+                        for entry in &mut entries {
+                            if entry.access == FileSystemAccessMode::Write {
+                                entry.access = FileSystemAccessMode::Read;
+                            }
+                        }
+                        PermissionProfile::Managed {
+                            file_system: ManagedFileSystemPermissions::Restricted {
+                                entries,
+                                glob_scan_max_depth,
+                            },
+                            network: NetworkSandboxPolicy::Restricted,
+                        }
+                    }
+                    PermissionProfile::External { .. } => {
+                        return Err(FunctionCallError::RespondToModel(format!(
+                            "depth {child_depth} read-only permission_profile cannot be enforced inside an external sandbox"
+                        )));
+                    }
+                }
             }
             codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite => {
                 match parent_permission_profile {

@@ -35,6 +35,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -770,6 +771,98 @@ async fn depth_authority_policy_preserves_narrower_managed_parent() {
     assert_eq!(
         child_config.permissions.permission_profile(),
         &parent_permission_profile
+    );
+}
+
+#[tokio::test]
+async fn depth_read_only_policy_preserves_custom_managed_read_boundaries() {
+    let (session, mut turn) = make_session_and_context().await;
+    let custom_path =
+        codex_utils_absolute_path::AbsolutePathBuf::try_from("/tmp/depth-policy-readable")
+            .expect("custom path should be absolute");
+    let parent_permission_profile = PermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries: vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: custom_path.clone(),
+                },
+                FileSystemAccessMode::Write,
+            )],
+            glob_scan_max_depth: None,
+        },
+        network: NetworkSandboxPolicy::Enabled,
+    };
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .set_permission_profile(parent_permission_profile.clone())
+        .expect("managed parent permission profile should be allowed");
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            permission_profile: Some(
+                codex_config::config_toml::AgentDepthPermissionProfileToml::ReadOnly,
+            ),
+            ..Default::default()
+        },
+    )]);
+    turn.permission_profile = parent_permission_profile;
+    set_turn_config(&mut turn, config);
+
+    let mut child_config = build_agent_spawn_config(&session.get_base_instructions().await, &turn)
+        .expect("child config should build");
+    apply_spawn_agent_depth_authority_policy(&turn, &mut child_config, 1)
+        .expect("depth authority policy should apply");
+
+    assert_eq!(
+        child_config.permissions.permission_profile(),
+        &PermissionProfile::Managed {
+            file_system: ManagedFileSystemPermissions::Restricted {
+                entries: vec![FileSystemSandboxEntry::new(
+                    FileSystemPath::Path { path: custom_path },
+                    FileSystemAccessMode::Read,
+                )],
+                glob_scan_max_depth: None,
+            },
+            network: NetworkSandboxPolicy::Restricted,
+        }
+    );
+}
+
+#[tokio::test]
+async fn depth_read_only_policy_rejects_external_parent() {
+    let (session, mut turn) = make_session_and_context().await;
+    let parent_permission_profile = PermissionProfile::External {
+        network: NetworkSandboxPolicy::Restricted,
+    };
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .set_permission_profile(parent_permission_profile.clone())
+        .expect("external parent permission profile should be allowed");
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            permission_profile: Some(
+                codex_config::config_toml::AgentDepthPermissionProfileToml::ReadOnly,
+            ),
+            ..Default::default()
+        },
+    )]);
+    turn.permission_profile = parent_permission_profile;
+    set_turn_config(&mut turn, config);
+
+    let mut child_config = build_agent_spawn_config(&session.get_base_instructions().await, &turn)
+        .expect("child config should build");
+    let err = apply_spawn_agent_depth_authority_policy(&turn, &mut child_config, 1)
+        .expect_err("external sandbox cannot be safely replaced with built-in read-only");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "depth 1 read-only permission_profile cannot be enforced inside an external sandbox"
+                .to_string(),
+        )
     );
 }
 
