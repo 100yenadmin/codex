@@ -636,6 +636,83 @@ async fn multi_agent_v2_spawn_accepts_luna_with_high_reasoning() {
 }
 
 #[tokio::test]
+async fn governed_handoff_injects_child_contract_without_inspecting_encrypted_message() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            handoff_contract: Some(
+                codex_config::config_toml::AgentDepthHandoffContractToml::Governed,
+            ),
+            inherit_project_instructions: Some(false),
+            inherit_skill_instructions: Some(false),
+            ..Default::default()
+        },
+    )]);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "encrypted-governed-handoff",
+                "task_name": "governed_child",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("encrypted governed handoff should spawn");
+    let (content, success) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            result.task_name.as_str(),
+        )
+        .await
+        .expect("spawned task name should resolve");
+    let child = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned agent thread should exist");
+    let child_turn = child.session.new_default_turn().await;
+    assert_eq!(child_turn.config.project_doc_max_bytes, 0);
+    assert!(!child_turn.config.include_skill_instructions);
+    assert!(
+        child_turn
+            .developer_instructions
+            .as_deref()
+            .is_some_and(|instructions| instructions.contains("HANDOFF_REJECTED"))
+    );
+    assert_eq!(success, Some(true));
+}
+
+#[tokio::test]
 async fn reasoning_only_depth_policy_validates_the_effective_child_model() {
     #[derive(Clone, Copy)]
     enum ChildModelSelection {

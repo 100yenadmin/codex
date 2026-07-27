@@ -6,6 +6,12 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentDepthHandoffContractToml": {
+      "enum": [
+        "governed"
+      ],
+      "type": "string"
+    },
     "AgentDepthPermissionProfileToml": {
       "enum": [
         "read-only",
@@ -34,6 +40,22 @@
         "fork_turns": {
           "description": "Required history-fork policy: `none` or a positive turn count.",
           "type": "string"
+        },
+        "handoff_contract": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentDepthHandoffContractToml"
+            }
+          ],
+          "description": "Optional structured handoff contract required for agents spawned at this depth."
+        },
+        "inherit_project_instructions": {
+          "description": "Whether agents spawned at this depth load project AGENTS.md instructions. Defaults to true.",
+          "type": "boolean"
+        },
+        "inherit_skill_instructions": {
+          "description": "Whether agents spawned at this depth receive the inherited skill catalog. Defaults to true. Set false when required skill guidance is embedded in the handoff.",
+          "type": "boolean"
         },
         "leaf": {
           "default": false,

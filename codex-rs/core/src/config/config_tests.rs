@@ -13,6 +13,7 @@ use codex_config::McpServerValueMatcher;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AgentDepthHandoffContractToml;
 use codex_config::config_toml::AgentDepthPermissionProfileToml;
 use codex_config::config_toml::AgentDepthPolicyToml;
 use codex_config::config_toml::AgentRoleToml;
@@ -8610,6 +8611,9 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                         fork_turns: Some("none".to_string()),
                         permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite),
                         approval_policy: Some(AskForApproval::Never),
+                        handoff_contract: Some(AgentDepthHandoffContractToml::Governed),
+                        inherit_project_instructions: Some(true),
+                        inherit_skill_instructions: Some(true),
                         leaf: false,
                         ..Default::default()
                     },
@@ -8622,6 +8626,9 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                         fork_turns: Some("none".to_string()),
                         permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite),
                         approval_policy: Some(AskForApproval::Never),
+                        handoff_contract: Some(AgentDepthHandoffContractToml::Governed),
+                        inherit_project_instructions: Some(false),
+                        inherit_skill_instructions: Some(false),
                         leaf: true,
                         ..Default::default()
                     },
@@ -8668,6 +8675,9 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                         fork_turns: Some(crate::config::AgentDepthForkTurns::None),
                         permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite,),
                         approval_policy: Some(AskForApproval::Never),
+                        handoff_contract: Some(AgentDepthHandoffContractToml::Governed),
+                        inherit_project_instructions: Some(true),
+                        inherit_skill_instructions: Some(true),
                         leaf: false,
                     },
                 ),
@@ -8680,6 +8690,9 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                         fork_turns: Some(crate::config::AgentDepthForkTurns::None),
                         permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite,),
                         approval_policy: Some(AskForApproval::Never),
+                        handoff_contract: Some(AgentDepthHandoffContractToml::Governed),
+                        inherit_project_instructions: Some(false),
+                        inherit_skill_instructions: Some(false),
                         leaf: true,
                     },
                 ),
@@ -8687,7 +8700,40 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             false,
         )
     );
+    assert!(
+        config
+            .developer_instructions
+            .as_deref()
+            .is_some_and(|instructions| instructions.contains("handoff_contract = \"governed\""))
+    );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_without_governed_handoff_preserves_developer_instructions()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        developer_instructions: Some("existing project instructions".to_string()),
+        agents: Some(AgentsToml {
+            max_depth: Some(2),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("existing project instructions")
+    );
     Ok(())
 }
 

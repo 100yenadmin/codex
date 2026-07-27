@@ -211,6 +211,9 @@ fn save_config_resolved_fields(
                         }),
                     permission_profile: policy.permission_profile,
                     approval_policy: policy.approval_policy,
+                    handoff_contract: policy.handoff_contract,
+                    inherit_project_instructions: policy.inherit_project_instructions,
+                    inherit_skill_instructions: policy.inherit_skill_instructions,
                     leaf: policy.leaf,
                 },
             )
@@ -434,6 +437,11 @@ mod tests {
                     codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
                 ),
                 approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+                handoff_contract: Some(
+                    codex_config::config_toml::AgentDepthHandoffContractToml::Governed,
+                ),
+                inherit_project_instructions: Some(false),
+                inherit_skill_instructions: Some(false),
                 ..Default::default()
             },
         );
@@ -462,6 +470,11 @@ mod tests {
                     codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
                 ),
                 approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+                handoff_contract: Some(
+                    codex_config::config_toml::AgentDepthHandoffContractToml::Governed,
+                ),
+                inherit_project_instructions: Some(false),
+                inherit_skill_instructions: Some(false),
                 ..Default::default()
             }
         );

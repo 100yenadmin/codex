@@ -694,9 +694,23 @@ pub struct AgentDepthPolicyToml {
     pub permission_profile: Option<AgentDepthPermissionProfileToml>,
     /// Approval policy required for agents spawned at this depth.
     pub approval_policy: Option<AskForApproval>,
+    /// Optional child-validated structured handoff contract for agents spawned at this depth.
+    pub handoff_contract: Option<AgentDepthHandoffContractToml>,
+    /// Whether agents spawned at this depth load project AGENTS.md instructions.
+    /// Defaults to true.
+    pub inherit_project_instructions: Option<bool>,
+    /// Whether agents spawned at this depth receive the inherited skill catalog.
+    /// Defaults to true. Set false when required skill guidance is embedded in the handoff.
+    pub inherit_skill_instructions: Option<bool>,
     /// Whether agents spawned at this depth are forbidden from spawning descendants.
     #[serde(default)]
     pub leaf: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentDepthHandoffContractToml {
+    Governed,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]

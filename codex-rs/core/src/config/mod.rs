@@ -178,6 +178,7 @@ pub(crate) use permissions::is_builtin_permission_profile_name;
 pub use resolved_permission_profile::PermissionProfileSnapshot;
 pub(crate) use resolved_permission_profile::PermissionProfileState;
 
+const GOVERNED_SPAWNER_DEVELOPER_INSTRUCTIONS: &str = r#"When spawning a child at a depth configured with handoff_contract = "governed", put the complete contract inside the existing spawn_agent message argument; do not add tool arguments. Start with <governed_handoff>, include one JSON object defining objective, owned_paths, references, allowed_actions, forbidden_actions, allowed_skills, acceptance_criteria, escalation_triggers, stop_conditions, and expected_return_shape, close </governed_handoff>, then put the self-contained task inside <task_brief>...</task_brief>. Do not rely on forked context for required instructions."#;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
 
@@ -2324,6 +2325,9 @@ pub struct AgentDepthPolicy {
     pub fork_turns: Option<AgentDepthForkTurns>,
     pub permission_profile: Option<codex_config::config_toml::AgentDepthPermissionProfileToml>,
     pub approval_policy: Option<AskForApproval>,
+    pub handoff_contract: Option<codex_config::config_toml::AgentDepthHandoffContractToml>,
+    pub inherit_project_instructions: Option<bool>,
+    pub inherit_skill_instructions: Option<bool>,
     pub leaf: bool,
 }
 
@@ -3794,6 +3798,10 @@ impl Config {
                                 }).transpose()?,
                                 permission_profile: policy.permission_profile,
                                 approval_policy: policy.approval_policy,
+                                handoff_contract: policy.handoff_contract,
+                                inherit_project_instructions: policy
+                                    .inherit_project_instructions,
+                                inherit_skill_instructions: policy.inherit_skill_instructions,
                                 leaf: policy.leaf,
                             },
                         ))
@@ -3835,6 +3843,9 @@ impl Config {
                 && policy.fork_turns.is_none()
                 && policy.permission_profile.is_none()
                 && policy.approval_policy.is_none()
+                && policy.handoff_contract.is_none()
+                && policy.inherit_project_instructions.is_none()
+                && policy.inherit_skill_instructions.is_none()
                 && !policy.leaf
             {
                 return Err(std::io::Error::new(
@@ -3937,6 +3948,21 @@ impl Config {
             .or(file_base_instructions)
             .or(cfg.instructions.clone());
         let developer_instructions = developer_instructions.or(cfg.developer_instructions);
+        let developer_instructions = if agent_depth_routing.values().any(|policy| {
+            matches!(
+                policy.handoff_contract,
+                Some(codex_config::config_toml::AgentDepthHandoffContractToml::Governed)
+            )
+        }) {
+            Some(match developer_instructions {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{existing}\n\n{GOVERNED_SPAWNER_DEVELOPER_INSTRUCTIONS}")
+                }
+                _ => GOVERNED_SPAWNER_DEVELOPER_INSTRUCTIONS.to_string(),
+            })
+        } else {
+            developer_instructions
+        };
         let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
         let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
         let include_collaboration_mode_instructions =

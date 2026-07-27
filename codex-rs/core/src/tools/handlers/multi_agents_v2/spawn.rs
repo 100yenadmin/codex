@@ -56,7 +56,6 @@ async fn handle_spawn_agent(
         .map(str::trim)
         .filter(|role| !role.is_empty());
 
-    let message = message_content(args.message)?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     if exceeds_thread_spawn_depth_limit(child_depth, turn.config.agent_max_depth) {
@@ -64,6 +63,7 @@ async fn handle_spawn_agent(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+    let message = message_content(args.message)?;
     let fork_mode = match turn
         .config
         .agent_depth_routing
@@ -106,6 +106,7 @@ async fn handle_spawn_agent(
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     apply_spawn_agent_depth_authority_policy(turn.as_ref(), &mut config, child_depth)?;
+    apply_spawn_agent_instruction_policy(turn.as_ref(), &mut config, child_depth);
 
     let spawn_source = thread_spawn_source(
         session.thread_id,

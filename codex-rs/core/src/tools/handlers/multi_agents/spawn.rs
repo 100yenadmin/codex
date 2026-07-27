@@ -68,6 +68,16 @@ async fn handle_spawn_agent(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+    if turn
+        .config
+        .agent_depth_routing
+        .get(&child_depth)
+        .is_some_and(|policy| policy.handoff_contract.is_some())
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "governed agent handoffs require MultiAgentV2".to_string(),
+        ));
+    }
     let fork_context = match turn
         .config
         .agent_depth_routing
@@ -129,6 +139,7 @@ async fn handle_spawn_agent(
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     apply_spawn_agent_depth_authority_policy(turn.as_ref(), &mut config, child_depth)?;
+    apply_spawn_agent_instruction_policy(turn.as_ref(), &mut config, child_depth);
 
     let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
         config,
