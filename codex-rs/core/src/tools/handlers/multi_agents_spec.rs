@@ -633,7 +633,8 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "message".to_string(),
             JsonSchema::string(Some(
-                "Initial plain-text task for the new agent.".to_string(),
+                "Self-contained task brief for the new agent. Include the objective, owned surface, allowed mutations, non-goals and forbidden actions, exact references, acceptance checks, escalation triggers, and expected return shape. Tell the child to stop and message its parent when a required action exceeds its authority or confidence."
+                    .to_string(),
             ))
             .with_encrypted(),
         ),

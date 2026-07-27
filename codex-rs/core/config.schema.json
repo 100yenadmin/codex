@@ -6,9 +6,35 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentDepthPermissionProfileToml": {
+      "enum": [
+        "read-only",
+        "workspace-write"
+      ],
+      "type": "string"
+    },
     "AgentDepthPolicyToml": {
       "additionalProperties": false,
       "properties": {
+        "allowed_reasoning_efforts": {
+          "description": "Allowed reasoning efforts for agents spawned at this depth. Mutually exclusive with `reasoning_effort`.",
+          "items": {
+            "$ref": "#/definitions/ReasoningEffort"
+          },
+          "type": "array"
+        },
+        "approval_policy": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AskForApproval"
+            }
+          ],
+          "description": "Approval policy required for agents spawned at this depth."
+        },
+        "fork_turns": {
+          "description": "Required history-fork policy: `none` or a positive turn count.",
+          "type": "string"
+        },
         "leaf": {
           "default": false,
           "description": "Whether agents spawned at this depth are forbidden from spawning descendants.",
@@ -17,6 +43,14 @@
         "model": {
           "description": "Model required for agents spawned at this depth.",
           "type": "string"
+        },
+        "permission_profile": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentDepthPermissionProfileToml"
+            }
+          ],
+          "description": "Safe permission profile required for agents spawned at this depth."
         },
         "reasoning_effort": {
           "allOf": [
@@ -76,7 +110,7 @@
             "$ref": "#/definitions/AgentDepthPolicyToml"
           },
           "default": {},
-          "description": "Model, reasoning, and leaf constraints keyed by spawned-agent depth.",
+          "description": "Model, reasoning, context, authority, and leaf constraints keyed by spawned-agent depth.",
           "type": "object"
         },
         "enabled": {

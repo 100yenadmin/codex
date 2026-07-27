@@ -49,7 +49,7 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let fork_mode = args.fork_mode()?;
+    let requested_fork_mode = args.fork_mode()?;
     let role_name = args
         .agent_type
         .as_deref()
@@ -64,6 +64,18 @@ async fn handle_spawn_agent(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+    let fork_mode = match turn
+        .config
+        .agent_depth_routing
+        .get(&child_depth)
+        .and_then(|policy| policy.fork_turns.as_ref())
+    {
+        Some(crate::config::AgentDepthForkTurns::None) => None,
+        Some(crate::config::AgentDepthForkTurns::LastNTurns(turns)) => {
+            Some(SpawnAgentForkMode::LastNTurns(*turns))
+        }
+        None => requested_fork_mode,
+    };
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     if let Some(service_tier) = args.service_tier.as_ref() {
@@ -93,6 +105,7 @@ async fn handle_spawn_agent(
     )
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    apply_spawn_agent_depth_authority_policy(turn.as_ref(), &mut config, child_depth)?;
 
     let spawn_source = thread_spawn_source(
         session.thread_id,

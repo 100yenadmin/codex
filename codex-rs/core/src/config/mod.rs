@@ -2320,7 +2320,17 @@ pub struct AgentRoleConfig {
 pub struct AgentDepthPolicy {
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub allowed_reasoning_efforts: Option<Vec<ReasoningEffort>>,
+    pub fork_turns: Option<AgentDepthForkTurns>,
+    pub permission_profile: Option<codex_config::config_toml::AgentDepthPermissionProfileToml>,
+    pub approval_policy: Option<AskForApproval>,
     pub leaf: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentDepthForkTurns {
+    None,
+    LastNTurns(usize),
 }
 
 fn resolve_tool_suggest_config(
@@ -3747,17 +3757,50 @@ impl Config {
                     .depth_routing
                     .iter()
                     .map(|(depth, policy)| {
-                        (
-                            *depth,
+                        let parsed_depth = depth.parse::<i32>().map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!(
+                                    "agents.depth_routing key `{depth}` must be a positive integer agent depth"
+                                ),
+                            )
+                        })?;
+                        Ok((
+                            parsed_depth,
                             AgentDepthPolicy {
                                 model: policy.model.clone(),
                                 reasoning_effort: policy.reasoning_effort.clone(),
+                                allowed_reasoning_efforts: policy
+                                    .allowed_reasoning_efforts
+                                    .clone(),
+                                fork_turns: policy.fork_turns.as_deref().map(|fork_turns| {
+                                    if fork_turns.eq_ignore_ascii_case("none") {
+                                        Ok(AgentDepthForkTurns::None)
+                                    } else {
+                                        fork_turns
+                                            .parse::<usize>()
+                                            .ok()
+                                            .filter(|turns| *turns > 0)
+                                            .map(AgentDepthForkTurns::LastNTurns)
+                                            .ok_or_else(|| {
+                                                std::io::Error::new(
+                                                    std::io::ErrorKind::InvalidInput,
+                                                    format!(
+                                                        "agents.depth_routing.{depth}.fork_turns must be `none` or a positive integer string"
+                                                    ),
+                                                )
+                                            })
+                                    }
+                                }).transpose()?,
+                                permission_profile: policy.permission_profile,
+                                approval_policy: policy.approval_policy,
                                 leaf: policy.leaf,
                             },
-                        )
+                        ))
                     })
-                    .collect::<BTreeMap<_, _>>()
+                    .collect::<std::io::Result<BTreeMap<_, _>>>()
             })
+            .transpose()?
             .unwrap_or_default();
         for (depth, policy) in &agent_depth_routing {
             if *depth < 1 {
@@ -3766,11 +3809,38 @@ impl Config {
                     "agents.depth_routing keys must be positive agent depths",
                 ));
             }
-            if policy.model.is_none() && policy.reasoning_effort.is_none() && !policy.leaf {
+            if policy.reasoning_effort.is_some() && policy.allowed_reasoning_efforts.is_some() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
-                        "agents.depth_routing.{depth} must configure model, reasoning_effort, or leaf"
+                        "agents.depth_routing.{depth} cannot configure both reasoning_effort and allowed_reasoning_efforts"
+                    ),
+                ));
+            }
+            if policy
+                .allowed_reasoning_efforts
+                .as_ref()
+                .is_some_and(Vec::is_empty)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.depth_routing.{depth}.allowed_reasoning_efforts must not be empty"
+                    ),
+                ));
+            }
+            if policy.model.is_none()
+                && policy.reasoning_effort.is_none()
+                && policy.allowed_reasoning_efforts.is_none()
+                && policy.fork_turns.is_none()
+                && policy.permission_profile.is_none()
+                && policy.approval_policy.is_none()
+                && !policy.leaf
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.depth_routing.{depth} must configure at least one routing constraint"
                     ),
                 ));
             }

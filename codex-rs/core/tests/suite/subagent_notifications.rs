@@ -1115,6 +1115,15 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
             builder.with_config(|config| {
                 config.agent_default_subagent_model = Some(INHERITED_MODEL.to_string());
                 config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::High);
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("test full-access permission profile should be allowed");
+                config
+                    .permissions
+                    .approval_policy
+                    .set(AskForApproval::Never)
+                    .expect("test approval policy should be allowed");
             })
         },
     )
@@ -1125,6 +1134,11 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
         child_snapshot.reasoning_effort,
         Some(REQUESTED_REASONING_EFFORT)
     );
+    assert_eq!(
+        child_snapshot.permission_profile,
+        PermissionProfile::Disabled
+    );
+    assert_eq!(child_snapshot.approval_policy, AskForApproval::Never);
 
     Ok(())
 }

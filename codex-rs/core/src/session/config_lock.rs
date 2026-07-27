@@ -195,10 +195,22 @@ fn save_config_resolved_fields(
         .iter()
         .map(|(depth, policy)| {
             (
-                *depth,
+                depth.to_string(),
                 AgentDepthPolicyToml {
                     model: policy.model.clone(),
                     reasoning_effort: policy.reasoning_effort.clone(),
+                    allowed_reasoning_efforts: policy.allowed_reasoning_efforts.clone(),
+                    fork_turns: policy
+                        .fork_turns
+                        .as_ref()
+                        .map(|fork_turns| match fork_turns {
+                            crate::config::AgentDepthForkTurns::None => "none".to_string(),
+                            crate::config::AgentDepthForkTurns::LastNTurns(turns) => {
+                                turns.to_string()
+                            }
+                        }),
+                    permission_profile: policy.permission_profile,
+                    approval_policy: policy.approval_policy,
                     leaf: policy.leaf,
                 },
             )
@@ -402,6 +414,57 @@ mod tests {
         );
 
         assert_eq!(lockfile.version, crate::config_lock::CONFIG_LOCK_VERSION);
+    }
+
+    #[tokio::test]
+    async fn lock_preserves_agent_depth_authority_policy() {
+        let mut sc = crate::session::tests::make_session_configuration_for_tests().await;
+        let mut config = (*sc.original_config_do_not_use).clone();
+        config.agent_depth_routing.insert(
+            1,
+            crate::config::AgentDepthPolicy {
+                model: Some("gpt-5.6-sol".to_string()),
+                allowed_reasoning_efforts: Some(vec![
+                    codex_protocol::openai_models::ReasoningEffort::Medium,
+                    codex_protocol::openai_models::ReasoningEffort::High,
+                    codex_protocol::openai_models::ReasoningEffort::XHigh,
+                ]),
+                fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+                permission_profile: Some(
+                    codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+                ),
+                approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+                ..Default::default()
+            },
+        );
+        sc.original_config_do_not_use = Arc::new(config);
+
+        let lockfile = sc.to_config_lockfile_toml().expect("lock should serialize");
+        let policy = lockfile
+            .config
+            .agents
+            .expect("agents lock config")
+            .depth_routing
+            .remove("1")
+            .expect("depth-1 policy should be locked");
+
+        assert_eq!(
+            policy,
+            AgentDepthPolicyToml {
+                model: Some("gpt-5.6-sol".to_string()),
+                allowed_reasoning_efforts: Some(vec![
+                    codex_protocol::openai_models::ReasoningEffort::Medium,
+                    codex_protocol::openai_models::ReasoningEffort::High,
+                    codex_protocol::openai_models::ReasoningEffort::XHigh,
+                ]),
+                fork_turns: Some("none".to_string()),
+                permission_profile: Some(
+                    codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+                ),
+                approval_policy: Some(codex_protocol::protocol::AskForApproval::Never),
+                ..Default::default()
+            }
+        );
     }
 
     #[tokio::test]

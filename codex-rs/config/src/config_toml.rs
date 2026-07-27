@@ -685,9 +685,25 @@ pub struct AgentDepthPolicyToml {
     pub model: Option<String>,
     /// Reasoning effort required for agents spawned at this depth.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Allowed reasoning efforts for agents spawned at this depth.
+    /// Mutually exclusive with `reasoning_effort`.
+    pub allowed_reasoning_efforts: Option<Vec<ReasoningEffort>>,
+    /// Required history-fork policy: `none` or a positive turn count.
+    pub fork_turns: Option<String>,
+    /// Safe permission profile required for agents spawned at this depth.
+    pub permission_profile: Option<AgentDepthPermissionProfileToml>,
+    /// Approval policy required for agents spawned at this depth.
+    pub approval_policy: Option<AskForApproval>,
     /// Whether agents spawned at this depth are forbidden from spawning descendants.
     #[serde(default)]
     pub leaf: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentDepthPermissionProfileToml {
+    ReadOnly,
+    WorkspaceWrite,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -707,9 +723,9 @@ pub struct AgentsToml {
     pub default_subagent_model: Option<String>,
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
-    /// Model, reasoning, and leaf constraints keyed by spawned-agent depth.
+    /// Model, reasoning, context, authority, and leaf constraints keyed by spawned-agent depth.
     #[serde(default)]
-    pub depth_routing: BTreeMap<i32, AgentDepthPolicyToml>,
+    pub depth_routing: BTreeMap<String, AgentDepthPolicyToml>,
     /// Removed agent-job setting retained as a no-op for compatibility.
     #[schemars(skip)]
     pub job_max_runtime_seconds: Option<u64>,

@@ -378,6 +378,59 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
 }
 
 #[tokio::test]
+async fn depth_policy_forces_v1_fork_context_none() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let role_name = install_role_with_model_override(&mut turn).await;
+    let mut config = (*turn.config).clone();
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+            ..Default::default()
+        },
+    )]);
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": role_name,
+                "fork_context": true
+            })),
+        ))
+        .await
+        .expect("depth policy should force a no-history V1 spawn");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.model_provider_id, "ollama");
+    assert_eq!(snapshot.forked_from_thread_id, None);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_override(&mut turn).await;
@@ -498,6 +551,7 @@ async fn multi_agent_v2_spawn_accepts_luna_with_high_reasoning() {
             model: Some("gpt-5.6-luna".to_string()),
             reasoning_effort: Some(ReasoningEffort::High),
             leaf: true,
+            ..Default::default()
         },
     )]);
     config
@@ -605,6 +659,7 @@ async fn reasoning_only_depth_policy_validates_the_effective_child_model() {
                 model: None,
                 reasoning_effort: Some(ReasoningEffort::Ultra),
                 leaf: false,
+                ..Default::default()
             },
         )]);
         config
@@ -649,6 +704,73 @@ async fn reasoning_only_depth_policy_validates_the_effective_child_model() {
             )
         );
     }
+}
+
+#[tokio::test]
+async fn depth_authority_policy_does_not_widen_read_only_parent() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::read_only())
+        .expect("read-only parent permission profile should be allowed");
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            permission_profile: Some(
+                codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+            ),
+            ..Default::default()
+        },
+    )]);
+    set_turn_config(&mut turn, config);
+
+    let mut child_config = build_agent_spawn_config(&session.get_base_instructions().await, &turn)
+        .expect("child config should build");
+    apply_spawn_agent_depth_authority_policy(&turn, &mut child_config, 1)
+        .expect("depth authority policy should apply");
+
+    assert_eq!(
+        child_config.permissions.permission_profile(),
+        &PermissionProfile::read_only()
+    );
+}
+
+#[tokio::test]
+async fn depth_authority_policy_preserves_narrower_managed_parent() {
+    let (session, mut turn) = make_session_and_context().await;
+    let parent_permission_profile = PermissionProfile::workspace_write_with(
+        &[],
+        NetworkSandboxPolicy::Enabled,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .set_permission_profile(parent_permission_profile.clone())
+        .expect("managed parent permission profile should be allowed");
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            permission_profile: Some(
+                codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+            ),
+            ..Default::default()
+        },
+    )]);
+    turn.permission_profile = parent_permission_profile.clone();
+    set_turn_config(&mut turn, config);
+
+    let mut child_config = build_agent_spawn_config(&session.get_base_instructions().await, &turn)
+        .expect("child config should build");
+    apply_spawn_agent_depth_authority_policy(&turn, &mut child_config, 1)
+        .expect("depth authority policy should apply");
+
+    assert_eq!(
+        child_config.permissions.permission_profile(),
+        &parent_permission_profile
+    );
 }
 
 #[tokio::test]
@@ -2769,14 +2891,37 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
     let mut config = (*turn.config).clone();
     config.model = Some("gpt-5.6-sol".to_string());
     config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::Disabled)
+        .expect("root full-access permission profile should be allowed");
+    config
+        .permissions
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("root approval policy should be allowed");
+    turn.permission_profile = PermissionProfile::Disabled;
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("root turn approval policy should be allowed");
     config.agent_max_depth = 2;
     config.agent_depth_routing = BTreeMap::from([
         (
             1,
             AgentDepthPolicy {
                 model: Some("gpt-5.6-sol".to_string()),
-                reasoning_effort: Some(ReasoningEffort::Medium),
+                allowed_reasoning_efforts: Some(vec![
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                    ReasoningEffort::XHigh,
+                ]),
+                fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+                permission_profile: Some(
+                    codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+                ),
+                approval_policy: Some(AskForApproval::Never),
                 leaf: false,
+                ..Default::default()
             },
         ),
         (
@@ -2784,7 +2929,13 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
             AgentDepthPolicy {
                 model: Some("gpt-5.6-luna".to_string()),
                 reasoning_effort: Some(ReasoningEffort::High),
+                fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+                permission_profile: Some(
+                    codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite,
+                ),
+                approval_policy: Some(AskForApproval::Never),
                 leaf: true,
+                ..Default::default()
             },
         ),
     ]);
@@ -2808,6 +2959,49 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
     let root_session = Arc::new(session);
     let root_turn = Arc::new(turn);
 
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "try to bypass the depth-1 effort policy",
+                "task_name": "forbidden_role",
+                "agent_type": role_name,
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("role-selected minimal effort should be rejected");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("unexpected role-policy error: {err:?}");
+    };
+    assert!(
+        message.contains("Reasoning effort `minimal` is not supported for model `gpt-5.6-sol`"),
+        "unexpected role-policy message: {message}"
+    );
+
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "try a supported but disallowed depth-1 effort",
+                "task_name": "forbidden_low",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "low",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("depth-1 low effort should be rejected");
+    assert!(
+        matches!(err, FunctionCallError::RespondToModel(message) if message.contains("Reasoning effort `low` is not allowed for agents at depth 1"))
+    );
+
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
             root_session.clone(),
@@ -2816,10 +3010,9 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
             function_payload(json!({
                 "message": "own the workstream",
                 "task_name": "workstream",
-                "agent_type": role_name,
                 "model": "gpt-5.6-terra",
-                "reasoning_effort": "max",
-                "fork_turns": "none"
+                "reasoning_effort": "xhigh",
+                "fork_turns": "all"
             })),
         ))
         .await
@@ -2847,9 +3040,16 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
             workstream_snapshot.model,
             workstream_snapshot.reasoning_effort
         ),
-        ("gpt-5.6-sol".to_string(), Some(ReasoningEffort::Medium))
+        ("gpt-5.6-sol".to_string(), Some(ReasoningEffort::XHigh))
     );
     assert_eq!(workstream_snapshot.model_provider_id, "openai");
+    assert_eq!(workstream_snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(
+        workstream_snapshot.permission_profile,
+        PermissionProfile::workspace_write()
+            .materialize_project_roots_with_workspace_roots(&workstream_snapshot.workspace_roots)
+    );
+    assert_eq!(workstream_snapshot.forked_from_thread_id, None);
 
     let workstream_session = workstream.session.clone();
     let workstream_turn = workstream_session.new_default_turn().await;
@@ -2863,7 +3063,7 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
                 "task_name": "leaf",
                 "model": "gpt-5.6-sol",
                 "reasoning_effort": "max",
-                "fork_turns": "none"
+                "fork_turns": "all"
             })),
         ))
         .await
@@ -2890,6 +3090,12 @@ async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
         (leaf_snapshot.model, leaf_snapshot.reasoning_effort),
         ("gpt-5.6-luna".to_string(), Some(ReasoningEffort::High))
     );
+    assert_eq!(leaf_snapshot.approval_policy, AskForApproval::Never);
+    assert_ne!(
+        leaf_snapshot.permission_profile,
+        PermissionProfile::Disabled
+    );
+    assert_eq!(leaf_snapshot.forked_from_thread_id, None);
 
     let leaf_session = leaf.session.clone();
     let leaf_turn = leaf_session.new_default_turn().await;

@@ -14,6 +14,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -287,16 +288,85 @@ pub(crate) async fn apply_spawn_agent_depth_policy(
             .clone_from(&turn.config.model_provider_id);
         config.model_provider = turn.provider.info().clone();
     }
+    let routed_reasoning_effort = policy.reasoning_effort.clone().or_else(|| {
+        policy
+            .allowed_reasoning_efforts
+            .as_ref()
+            .and(config.model_reasoning_effort.clone())
+    });
     apply_spawn_agent_model_overrides(
         session,
         turn,
         config,
         policy.model.as_deref(),
-        policy.reasoning_effort.clone(),
+        routed_reasoning_effort,
     )
     .await?;
+    if let Some(allowed_reasoning_efforts) = policy.allowed_reasoning_efforts.as_ref() {
+        let effective_reasoning_effort = config.model_reasoning_effort.as_ref().ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!(
+                "spawn_agent could not resolve the reasoning effort required by the depth {child_depth} policy"
+            ))
+        })?;
+        if !allowed_reasoning_efforts.contains(effective_reasoning_effort) {
+            let allowed = allowed_reasoning_efforts
+                .iter()
+                .map(ReasoningEffort::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(FunctionCallError::RespondToModel(format!(
+                "Reasoning effort `{}` is not allowed for agents at depth {child_depth}. Allowed efforts: {allowed}",
+                effective_reasoning_effort.as_str()
+            )));
+        }
+    }
     if policy.leaf {
         config.agent_max_depth = child_depth;
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_spawn_agent_depth_authority_policy(
+    turn: &TurnContext,
+    config: &mut Config,
+    child_depth: i32,
+) -> Result<(), FunctionCallError> {
+    let Some(policy) = turn.config.agent_depth_routing.get(&child_depth) else {
+        return Ok(());
+    };
+    if let Some(permission_profile) = policy.permission_profile {
+        let parent_permission_profile = turn.permission_profile();
+        let permission_profile = match permission_profile {
+            codex_config::config_toml::AgentDepthPermissionProfileToml::ReadOnly => {
+                PermissionProfile::read_only()
+            }
+            codex_config::config_toml::AgentDepthPermissionProfileToml::WorkspaceWrite => {
+                match parent_permission_profile {
+                    PermissionProfile::Disabled => PermissionProfile::workspace_write(),
+                    managed @ (PermissionProfile::Managed { .. }
+                    | PermissionProfile::External { .. }) => managed,
+                }
+            }
+        };
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "depth {child_depth} permission_profile is invalid: {err}"
+                ))
+            })?;
+    }
+    if let Some(approval_policy) = policy.approval_policy {
+        config
+            .permissions
+            .approval_policy
+            .set(approval_policy)
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "depth {child_depth} approval_policy is invalid: {err}"
+                ))
+            })?;
     }
     Ok(())
 }

@@ -13,6 +13,7 @@ use codex_config::McpServerValueMatcher;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AgentDepthPermissionProfileToml;
 use codex_config::config_toml::AgentDepthPolicyToml;
 use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
@@ -8598,19 +8599,31 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
             depth_routing: BTreeMap::from([
                 (
-                    1,
+                    "1".to_string(),
                     AgentDepthPolicyToml {
                         model: Some("gpt-5.6-sol".to_string()),
-                        reasoning_effort: Some(ReasoningEffort::Medium),
+                        allowed_reasoning_efforts: Some(vec![
+                            ReasoningEffort::Medium,
+                            ReasoningEffort::High,
+                            ReasoningEffort::XHigh,
+                        ]),
+                        fork_turns: Some("none".to_string()),
+                        permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite),
+                        approval_policy: Some(AskForApproval::Never),
                         leaf: false,
+                        ..Default::default()
                     },
                 ),
                 (
-                    2,
+                    "2".to_string(),
                     AgentDepthPolicyToml {
                         model: Some("gpt-5.6-luna".to_string()),
                         reasoning_effort: Some(ReasoningEffort::High),
+                        fork_turns: Some("none".to_string()),
+                        permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite),
+                        approval_policy: Some(AskForApproval::Never),
                         leaf: true,
+                        ..Default::default()
                     },
                 ),
             ]),
@@ -8646,7 +8659,15 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                     1,
                     crate::config::AgentDepthPolicy {
                         model: Some("gpt-5.6-sol".to_string()),
-                        reasoning_effort: Some(ReasoningEffort::Medium),
+                        reasoning_effort: None,
+                        allowed_reasoning_efforts: Some(vec![
+                            ReasoningEffort::Medium,
+                            ReasoningEffort::High,
+                            ReasoningEffort::XHigh,
+                        ]),
+                        fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+                        permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite,),
+                        approval_policy: Some(AskForApproval::Never),
                         leaf: false,
                     },
                 ),
@@ -8655,6 +8676,10 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
                     crate::config::AgentDepthPolicy {
                         model: Some("gpt-5.6-luna".to_string()),
                         reasoning_effort: Some(ReasoningEffort::High),
+                        allowed_reasoning_efforts: None,
+                        fork_turns: Some(crate::config::AgentDepthForkTurns::None),
+                        permission_profile: Some(AgentDepthPermissionProfileToml::WorkspaceWrite,),
+                        approval_policy: Some(AskForApproval::Never),
                         leaf: true,
                     },
                 ),
@@ -8688,10 +8713,65 @@ leaf = true
             .expect("agents config")
             .depth_routing
             .keys()
-            .copied()
+            .cloned()
             .collect::<Vec<_>>(),
-        vec![1, 2]
+        vec!["1".to_string(), "2".to_string()]
     );
+}
+
+#[tokio::test]
+async fn load_config_rejects_conflicting_depth_reasoning_constraints() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+[agents.depth_routing."1"]
+reasoning_effort = "medium"
+allowed_reasoning_efforts = ["medium", "high", "xhigh"]
+"#,
+    )
+    .expect("depth routing should deserialize");
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("conflicting reasoning constraints should be rejected");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("cannot configure both reasoning_effort and allowed_reasoning_efforts")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_full_history_depth_fork_policy() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+[agents.depth_routing."1"]
+fork_turns = "all"
+"#,
+    )
+    .expect("depth routing should deserialize");
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("full-history depth policy should be rejected");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("fork_turns must be `none` or a positive integer string")
+    );
+    Ok(())
 }
 
 #[test]

@@ -68,6 +68,21 @@ async fn handle_spawn_agent(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
+    let fork_context = match turn
+        .config
+        .agent_depth_routing
+        .get(&child_depth)
+        .and_then(|policy| policy.fork_turns.as_ref())
+    {
+        Some(crate::config::AgentDepthForkTurns::None) => false,
+        Some(crate::config::AgentDepthForkTurns::LastNTurns(_)) => {
+            return Err(FunctionCallError::RespondToModel(
+                "Positive agents.depth_routing fork_turns policies require MultiAgentV2"
+                    .to_string(),
+            ));
+        }
+        None => args.fork_context,
+    };
     session
         .emit_turn_item_started(
             &turn,
@@ -90,7 +105,7 @@ async fn handle_spawn_agent(
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
-    if args.fork_context {
+    if fork_context {
         reject_full_fork_agent_type_override(role_name)?;
     }
     apply_requested_spawn_agent_model_overrides(
@@ -101,7 +116,7 @@ async fn handle_spawn_agent(
         args.reasoning_effort.clone(),
     )
     .await?;
-    if !args.fork_context {
+    if !fork_context {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
     }
     apply_spawn_agent_depth_policy(&session, turn.as_ref(), &mut config, child_depth).await?;
@@ -113,6 +128,7 @@ async fn handle_spawn_agent(
     )
     .await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    apply_spawn_agent_depth_authority_policy(turn.as_ref(), &mut config, child_depth)?;
 
     let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
         config,
@@ -125,8 +141,8 @@ async fn handle_spawn_agent(
             /*task_name*/ None,
         )?),
         SpawnAgentOptions {
-            fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-            fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+            fork_parent_spawn_call_id: fork_context.then(|| call_id.clone()),
+            fork_mode: fork_context.then_some(SpawnAgentForkMode::FullHistory),
             parent_thread_id: Some(session.thread_id),
             environments: Some(turn.environments.to_selections()),
         },
