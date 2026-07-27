@@ -345,9 +345,24 @@ async fn apply_spawn_agent_model_overrides(
     }
 
     if let Some(reasoning_effort) = requested_reasoning_effort {
+        let model = config.model.clone().ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "spawn_agent could not resolve the child model for reasoning effort validation"
+                    .to_string(),
+            )
+        })?;
+        let model_info = session
+            .services
+            .models_manager
+            .get_model_info(&model, &config.to_models_manager_config())
+            .await;
+        if model_info.used_fallback_model_metadata {
+            config.model_reasoning_effort = Some(reasoning_effort);
+            return Ok(());
+        }
         validate_spawn_agent_reasoning_effort(
-            &turn.model_info.slug,
-            &turn.model_info.supported_reasoning_levels,
+            &model,
+            &model_info.supported_reasoning_levels,
             &reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);

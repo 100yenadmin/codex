@@ -144,6 +144,35 @@ model_reasoning_effort = "minimal"
     role_name
 }
 
+async fn install_role_with_sol_override(turn: &mut TurnContext) -> String {
+    let role_name = "sol-model-role".to_string();
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let role_config_path = turn.config.codex_home.as_path().join("sol-model-role.toml");
+    tokio::fs::write(
+        &role_config_path,
+        r#"model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await
+    .expect("role config should be written");
+
+    let mut config = (*turn.config).clone();
+    config.agent_roles.insert(
+        role_name.clone(),
+        AgentRoleConfig {
+            description: Some("Role with a known model override".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+        },
+    );
+    turn.config = Arc::new(config);
+
+    role_name
+}
+
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
     turn.multi_agent_version = config.multi_agent_version_from_features();
     turn.config = Arc::new(config);
@@ -549,6 +578,77 @@ async fn multi_agent_v2_spawn_accepts_luna_with_high_reasoning() {
             "Agent depth limit reached. Solve the task yourself.".to_string()
         )
     );
+}
+
+#[tokio::test]
+async fn reasoning_only_depth_policy_validates_the_effective_child_model() {
+    #[derive(Clone, Copy)]
+    enum ChildModelSelection {
+        Explicit,
+        Role,
+    }
+
+    for selection in [ChildModelSelection::Explicit, ChildModelSelection::Role] {
+        let (session, turn) = make_session_and_context().await;
+        let mut turn = turn
+            .with_model("gpt-5.6-luna".to_string(), &session.services.models_manager)
+            .await;
+        turn.reasoning_effort = Some(ReasoningEffort::High);
+        let role_name = match selection {
+            ChildModelSelection::Explicit => None,
+            ChildModelSelection::Role => Some(install_role_with_sol_override(&mut turn).await),
+        };
+        let mut config = (*turn.config).clone();
+        config.agent_depth_routing = BTreeMap::from([(
+            1,
+            AgentDepthPolicy {
+                model: None,
+                reasoning_effort: Some(ReasoningEffort::Ultra),
+                leaf: false,
+            },
+        )]);
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        set_turn_config(&mut turn, config);
+
+        let mut child_config =
+            build_agent_spawn_config(&session.get_base_instructions().await, &turn)
+                .expect("child config should build");
+        let explicit_model =
+            matches!(selection, ChildModelSelection::Explicit).then_some("gpt-5.6-sol");
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            &turn,
+            &mut child_config,
+            explicit_model,
+            None,
+        )
+        .await
+        .expect("explicit model should resolve");
+        if let Some(role_name) = role_name.as_deref() {
+            apply_spawn_agent_role(&session, &mut child_config, Some(role_name))
+                .await
+                .expect("role model should resolve");
+        }
+        apply_spawn_agent_depth_policy(&session, &turn, &mut child_config, 1)
+            .await
+            .expect("reasoning-only policy should validate the effective child model");
+
+        assert_eq!(
+            (
+                child_config.model,
+                child_config.model_provider_id,
+                child_config.model_reasoning_effort,
+            ),
+            (
+                Some("gpt-5.6-sol".to_string()),
+                "openai".to_string(),
+                Some(ReasoningEffort::Ultra),
+            )
+        );
+    }
 }
 
 #[tokio::test]
