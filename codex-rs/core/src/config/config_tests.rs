@@ -13,6 +13,7 @@ use codex_config::McpServerValueMatcher;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AgentDepthPolicyToml;
 use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
@@ -7648,6 +7649,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            depth_routing: BTreeMap::new(),
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -8594,6 +8596,24 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             max_depth: Some(2),
             default_subagent_model: Some("gpt-5.6-terra".to_string()),
             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
+            depth_routing: BTreeMap::from([
+                (
+                    1,
+                    AgentDepthPolicyToml {
+                        model: Some("gpt-5.6-sol".to_string()),
+                        reasoning_effort: Some(ReasoningEffort::Medium),
+                        leaf: false,
+                    },
+                ),
+                (
+                    2,
+                    AgentDepthPolicyToml {
+                        model: Some("gpt-5.6-luna".to_string()),
+                        reasoning_effort: Some(ReasoningEffort::High),
+                        leaf: true,
+                    },
+                ),
+            ]),
             interrupt_message: Some(false),
             ..Default::default()
         }),
@@ -8613,6 +8633,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             config.agent_max_depth,
             config.agent_default_subagent_model.as_deref(),
             config.agent_default_subagent_reasoning_effort,
+            config.agent_depth_routing.clone(),
             config.agent_interrupt_message_enabled,
         ),
         (
@@ -8620,11 +8641,57 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             2,
             Some("gpt-5.6-terra"),
             Some(ReasoningEffort::High),
+            BTreeMap::from([
+                (
+                    1,
+                    crate::config::AgentDepthPolicy {
+                        model: Some("gpt-5.6-sol".to_string()),
+                        reasoning_effort: Some(ReasoningEffort::Medium),
+                        leaf: false,
+                    },
+                ),
+                (
+                    2,
+                    crate::config::AgentDepthPolicy {
+                        model: Some("gpt-5.6-luna".to_string()),
+                        reasoning_effort: Some(ReasoningEffort::High),
+                        leaf: true,
+                    },
+                ),
+            ]),
             false,
         )
     );
 
     Ok(())
+}
+
+#[test]
+fn agents_depth_routing_deserializes_quoted_depths() {
+    let config: ConfigToml = toml::from_str(
+        r#"
+[agents.depth_routing."1"]
+model = "gpt-5.6-sol"
+reasoning_effort = "medium"
+
+[agents.depth_routing."2"]
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+leaf = true
+"#,
+    )
+    .expect("depth routing should deserialize");
+
+    assert_eq!(
+        config
+            .agents
+            .expect("agents config")
+            .depth_routing
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 #[test]
@@ -8658,6 +8725,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            depth_routing: BTreeMap::new(),
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -8704,6 +8772,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            depth_routing: BTreeMap::new(),
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -8744,6 +8813,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            depth_routing: BTreeMap::new(),
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(
@@ -8784,6 +8854,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             max_depth: None,
             default_subagent_model: None,
             default_subagent_reasoning_effort: None,
+            depth_routing: BTreeMap::new(),
             job_max_runtime_seconds: None,
             interrupt_message: None,
             roles: BTreeMap::from([(

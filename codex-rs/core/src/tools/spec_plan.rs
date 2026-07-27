@@ -360,6 +360,13 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
     }
 }
 
+fn spawn_agent_enabled(turn_context: &TurnContext) -> bool {
+    !exceeds_thread_spawn_depth_limit(
+        next_thread_spawn_depth(&turn_context.session_source),
+        turn_context.config.agent_max_depth,
+    )
+}
+
 fn image_generation_available(turn_context: &TurnContext) -> bool {
     if !turn_context
         .config
@@ -838,24 +845,30 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                        hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
-                        multi_agent_version: turn_context.multi_agent_version,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                    }),
-                    tool_namespace,
-                ),
-                exposure,
-            ));
+            if spawn_agent_enabled(turn_context) {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                            available_models: turn_context.available_models.clone(),
+                            agent_type_description,
+                            expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                            hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
+                            expose_spawn_agent_model_overrides: turn_context
+                                .config
+                                .multi_agent_v2
+                                .expose_spawn_agent_model_overrides,
+                            multi_agent_version: turn_context.multi_agent_version,
+                            usage_hint_text: turn_context
+                                .config
+                                .multi_agent_v2
+                                .usage_hint_text
+                                .clone(),
+                        }),
+                        tool_namespace,
+                    ),
+                    exposure,
+                ));
+            }
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
                 exposure,

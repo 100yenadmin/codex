@@ -1,6 +1,7 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
+use crate::config::AgentDepthPolicy;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
@@ -25,6 +26,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::built_in_model_providers;
+use codex_models_manager::bundled_models_response;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -62,6 +64,7 @@ use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -420,8 +423,130 @@ async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "Unknown model `gpt-5.4` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra"
+            "Unknown model `gpt-5.4` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna"
                 .to_string()
+        )
+    );
+}
+
+#[test]
+fn multi_agent_v2_accepts_luna_from_a_legacy_v1_catalog_only() {
+    let bundled_models = bundled_models_response().expect("bundled model catalog should parse");
+    let mut luna = bundled_models
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-5.6-luna")
+        .cloned()
+        .map(codex_protocol::openai_models::ModelPreset::from)
+        .expect("bundled catalog should include Luna");
+    luna.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::V1);
+    let mut incompatible = luna.clone();
+    incompatible.model = "unrelated-v1-model".to_string();
+
+    assert!(model_supports_multi_agent_backend(
+        &luna,
+        codex_protocol::protocol::MultiAgentVersion::V2
+    ));
+    assert!(!model_supports_multi_agent_backend(
+        &incompatible,
+        codex_protocol::protocol::MultiAgentVersion::V2
+    ));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_accepts_luna_with_high_reasoning() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_max_depth = 2;
+    config.agent_depth_routing = BTreeMap::from([(
+        1,
+        AgentDepthPolicy {
+            model: Some("gpt-5.6-luna".to_string()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            leaf: true,
+        },
+    )]);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "implement the bounded task",
+                "task_name": "luna_leaf",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("multi-agent v2 should spawn Luna");
+    let (content, success) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            result.task_name.as_str(),
+        )
+        .await
+        .expect("spawned task name should resolve");
+    let child = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned agent thread should exist");
+    let snapshot = child.config_snapshot().await;
+
+    assert_eq!(
+        (snapshot.model, snapshot.reasoning_effort),
+        ("gpt-5.6-luna".to_string(), Some(ReasoningEffort::High))
+    );
+    assert_eq!(success, Some(true));
+
+    let child_session = child.session.clone();
+    let child_turn = child_session.new_default_turn().await;
+    assert_eq!(child_turn.config.agent_max_depth, 1);
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            child_session,
+            child_turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "try to spawn a descendant",
+                "task_name": "forbidden",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("configured Luna leaf should reject descendants");
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
         )
     );
 }
@@ -2434,7 +2559,7 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
+async fn multi_agent_v2_spawn_agent_allows_depth_up_to_configured_max_depth() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -2444,7 +2569,7 @@ async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let mut config = (*turn.config).clone();
-    config.agent_max_depth = 1;
+    config.agent_max_depth = 2;
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -2478,13 +2603,216 @@ async fn multi_agent_v2_spawn_agent_ignores_configured_max_depth() {
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation)
         .await
-        .expect("multi-agent v2 spawn should ignore max depth");
+        .expect("multi-agent v2 spawn should allow configured max depth");
     let (content, success) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
     assert_eq!(result.task_name, "/root/parent/child");
     assert_eq!(result.nickname, None);
     assert_eq!(success, Some(true));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_spawn_agent_rejects_depth_beyond_configured_max_depth() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_max_depth = 2;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: session.thread_id,
+        depth: 2,
+        agent_path: Some(AgentPath::try_from("/root/parent/leaf").expect("agent path")),
+        agent_nickname: None,
+        agent_role: None,
+    });
+
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "hello",
+                "task_name": "too_deep",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("multi-agent v2 should reject depth beyond max_depth");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_depth_routing_enforces_hierarchy_and_leaf() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
+        .await;
+    turn.reasoning_effort = Some(ReasoningEffort::High);
+    let role_name = install_role_with_model_override(&mut turn).await;
+    let mut config = (*turn.config).clone();
+    config.model = Some("gpt-5.6-sol".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config.agent_max_depth = 2;
+    config.agent_depth_routing = BTreeMap::from([
+        (
+            1,
+            AgentDepthPolicy {
+                model: Some("gpt-5.6-sol".to_string()),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                leaf: false,
+            },
+        ),
+        (
+            2,
+            AgentDepthPolicy {
+                model: Some("gpt-5.6-luna".to_string()),
+                reasoning_effort: Some(ReasoningEffort::High),
+                leaf: true,
+            },
+        ),
+    ]);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config.clone());
+    assert_eq!(
+        (turn.model_info.slug.as_str(), turn.reasoning_effort.clone()),
+        ("gpt-5.6-sol", Some(ReasoningEffort::High))
+    );
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let root_session = Arc::new(session);
+    let root_turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "own the workstream",
+                "task_name": "workstream",
+                "agent_type": role_name,
+                "model": "gpt-5.6-terra",
+                "reasoning_effort": "max",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("depth-1 spawn should succeed");
+    let (content, _) = expect_text_output(output);
+    let workstream_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let workstream_id = root_session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            root_session.thread_id,
+            &root_turn.session_source,
+            workstream_result.task_name.as_str(),
+        )
+        .await
+        .expect("workstream task name should resolve");
+    let workstream = manager
+        .get_thread(workstream_id)
+        .await
+        .expect("workstream thread should exist");
+    let workstream_snapshot = workstream.config_snapshot().await;
+    assert_eq!(
+        (
+            workstream_snapshot.model,
+            workstream_snapshot.reasoning_effort
+        ),
+        ("gpt-5.6-sol".to_string(), Some(ReasoningEffort::Medium))
+    );
+    assert_eq!(workstream_snapshot.model_provider_id, "openai");
+
+    let workstream_session = workstream.session.clone();
+    let workstream_turn = workstream_session.new_default_turn().await;
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            workstream_session.clone(),
+            workstream_turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "implement the leaf task",
+                "task_name": "leaf",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "max",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("depth-2 spawn should succeed");
+    let (content, _) = expect_text_output(output);
+    let leaf_result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let leaf_id = workstream_session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            workstream_session.thread_id,
+            &workstream_turn.session_source,
+            leaf_result.task_name.as_str(),
+        )
+        .await
+        .expect("leaf task name should resolve");
+    let leaf = manager
+        .get_thread(leaf_id)
+        .await
+        .expect("leaf thread should exist");
+    let leaf_snapshot = leaf.config_snapshot().await;
+    assert_eq!(
+        (leaf_snapshot.model, leaf_snapshot.reasoning_effort),
+        ("gpt-5.6-luna".to_string(), Some(ReasoningEffort::High))
+    );
+
+    let leaf_session = leaf.session.clone();
+    let leaf_turn = leaf_session.new_default_turn().await;
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            leaf_session,
+            leaf_turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "escape the leaf policy",
+                "task_name": "forbidden",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .err()
+        .expect("leaf should not spawn descendants");
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string()
+        )
+    );
 }
 
 #[tokio::test]

@@ -875,10 +875,13 @@ pub struct Config {
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Model, reasoning, and leaf constraints keyed by spawned-agent depth.
+    pub agent_depth_routing: BTreeMap<i32, AgentDepthPolicy>,
+
     /// Whether to record a model-visible message when an agent turn is interrupted.
     pub agent_interrupt_message_enabled: bool,
 
-    /// Maximum nesting depth for V1 agent threads. Ignored by V2.
+    /// Maximum nesting depth for spawned agent threads.
     pub agent_max_depth: i32,
 
     /// User-defined role declarations keyed by role name.
@@ -2313,6 +2316,13 @@ pub struct AgentRoleConfig {
     pub nickname_candidates: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentDepthPolicy {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub leaf: bool,
+}
+
 fn resolve_tool_suggest_config(
     config_toml: &ConfigToml,
     config_layer_stack: &ConfigLayerStack,
@@ -3729,6 +3739,42 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
+        let agent_depth_routing = cfg
+            .agents
+            .as_ref()
+            .map(|agents| {
+                agents
+                    .depth_routing
+                    .iter()
+                    .map(|(depth, policy)| {
+                        (
+                            *depth,
+                            AgentDepthPolicy {
+                                model: policy.model.clone(),
+                                reasoning_effort: policy.reasoning_effort.clone(),
+                                leaf: policy.leaf,
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for (depth, policy) in &agent_depth_routing {
+            if *depth < 1 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "agents.depth_routing keys must be positive agent depths",
+                ));
+            }
+            if policy.model.is_none() && policy.reasoning_effort.is_none() && !policy.leaf {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.depth_routing.{depth} must configure model, reasoning_effort, or leaf"
+                    ),
+                ));
+            }
+        }
         let agent_interrupt_message_enabled = cfg
             .agents
             .as_ref()
@@ -4072,6 +4118,7 @@ impl Config {
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
+            agent_depth_routing,
             agent_max_depth,
             agent_roles,
             memories: memories_config,

@@ -6,6 +6,29 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentDepthPolicyToml": {
+      "additionalProperties": false,
+      "properties": {
+        "leaf": {
+          "default": false,
+          "description": "Whether agents spawned at this depth are forbidden from spawning descendants.",
+          "type": "boolean"
+        },
+        "model": {
+          "description": "Model required for agents spawned at this depth.",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Reasoning effort required for agents spawned at this depth."
+        }
+      },
+      "type": "object"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -48,6 +71,14 @@
           ],
           "description": "Default reasoning effort for spawned subagents when the spawn call does not select one."
         },
+        "depth_routing": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AgentDepthPolicyToml"
+          },
+          "default": {},
+          "description": "Model, reasoning, and leaf constraints keyed by spawned-agent depth.",
+          "type": "object"
+        },
         "enabled": {
           "description": "Whether multi-agent tools are enabled. Defaults to true. An enabled `features.multi_agent_v2` setting takes precedence.",
           "type": "boolean"
@@ -63,7 +94,7 @@
           "type": "integer"
         },
         "max_depth": {
-          "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
+          "description": "Maximum nesting depth for spawned agent threads.",
           "format": "int32",
           "type": "integer"
         }

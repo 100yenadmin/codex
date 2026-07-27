@@ -30,6 +30,7 @@ pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIME
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
+const MULTI_AGENT_V2_LEGACY_COMPATIBLE_MODEL: &str = "gpt-5.6-luna";
 
 pub(crate) fn model_supports_multi_agent_backend(
     model: &ModelPreset,
@@ -37,6 +38,9 @@ pub(crate) fn model_supports_multi_agent_backend(
 ) -> bool {
     multi_agent_version != MultiAgentVersion::V2
         || model.multi_agent_version == Some(multi_agent_version)
+        // The authoritative ChatGPT catalog can lag the bundled Luna V2 capability metadata.
+        || (model.model == MULTI_AGENT_V2_LEGACY_COMPATIBLE_MODEL
+            && model.multi_agent_version == Some(MultiAgentVersion::V1))
 }
 
 pub(crate) fn function_arguments(payload: ToolPayload) -> Result<String, FunctionCallError> {
@@ -254,6 +258,56 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
     let requested_reasoning_effort = requested_reasoning_effort
         .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
+    apply_spawn_agent_model_overrides(
+        session,
+        turn,
+        config,
+        requested_model,
+        requested_reasoning_effort,
+    )
+    .await
+}
+
+pub(crate) async fn apply_spawn_agent_depth_policy(
+    session: &Session,
+    turn: &TurnContext,
+    config: &mut Config,
+    child_depth: i32,
+) -> Result<(), FunctionCallError> {
+    let Some(policy) = turn.config.agent_depth_routing.get(&child_depth) else {
+        return Ok(());
+    };
+    config.agent_max_depth = turn.config.agent_max_depth;
+    config
+        .agent_depth_routing
+        .clone_from(&turn.config.agent_depth_routing);
+    if policy.model.is_some() {
+        config
+            .model_provider_id
+            .clone_from(&turn.config.model_provider_id);
+        config.model_provider = turn.provider.info().clone();
+    }
+    apply_spawn_agent_model_overrides(
+        session,
+        turn,
+        config,
+        policy.model.as_deref(),
+        policy.reasoning_effort.clone(),
+    )
+    .await?;
+    if policy.leaf {
+        config.agent_max_depth = child_depth;
+    }
+    Ok(())
+}
+
+async fn apply_spawn_agent_model_overrides(
+    session: &Session,
+    turn: &TurnContext,
+    config: &mut Config,
+    requested_model: Option<&str>,
+    requested_reasoning_effort: Option<ReasoningEffort>,
+) -> Result<(), FunctionCallError> {
     if requested_model.is_none() && requested_reasoning_effort.is_none() {
         return Ok(());
     }

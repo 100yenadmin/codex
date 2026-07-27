@@ -65,11 +65,7 @@ fn render_agents_config_lines(config: &Config) -> Vec<Line<'static>> {
             format_optional(config.agent_max_threads)
         )
         .into(),
-        format!(
-            "  - max_depth = {} (V1 only; ignored by V2)",
-            config.agent_max_depth
-        )
-        .into(),
+        format!("  - max_depth = {}", config.agent_max_depth).into(),
         format!(
             "  - default_subagent_model = {}",
             format_optional(config.agent_default_subagent_model.as_deref())
@@ -78,6 +74,11 @@ fn render_agents_config_lines(config: &Config) -> Vec<Line<'static>> {
         format!(
             "  - default_subagent_reasoning_effort = {}",
             format_optional(config.agent_default_subagent_reasoning_effort.as_ref())
+        )
+        .into(),
+        format!(
+            "  - depth_routing = {} configured depth(s)",
+            config.agent_depth_routing.len()
         )
         .into(),
         format!(

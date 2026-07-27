@@ -680,6 +680,18 @@ where
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
+pub struct AgentDepthPolicyToml {
+    /// Model required for agents spawned at this depth.
+    pub model: Option<String>,
+    /// Reasoning effort required for agents spawned at this depth.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Whether agents spawned at this depth are forbidden from spawning descendants.
+    #[serde(default)]
+    pub leaf: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Whether multi-agent tools are enabled. Defaults to true.
     /// An enabled `features.multi_agent_v2` setting takes precedence.
@@ -689,12 +701,15 @@ pub struct AgentsToml {
     #[serde(alias = "max_threads")]
     #[schemars(range(min = 1))]
     pub max_concurrent_threads_per_session: Option<usize>,
-    /// Maximum nesting depth for V1 agent threads. Ignored by V2.
+    /// Maximum nesting depth for spawned agent threads.
     pub max_depth: Option<i32>,
     /// Default model for spawned subagents when the spawn call does not select one.
     pub default_subagent_model: Option<String>,
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
+    /// Model, reasoning, and leaf constraints keyed by spawned-agent depth.
+    #[serde(default)]
+    pub depth_routing: BTreeMap<i32, AgentDepthPolicyToml>,
     /// Removed agent-job setting retained as a no-op for compatibility.
     #[schemars(skip)]
     pub job_max_runtime_seconds: Option<u64>,

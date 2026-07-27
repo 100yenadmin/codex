@@ -1608,6 +1608,38 @@ async fn multi_agent_v2_can_disable_wait_agent() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_leaf_omits_spawn_but_keeps_communication_tools() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.agent_max_depth = 2;
+        });
+        turn.session_source = codex_protocol::protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                parent_thread_id: codex_protocol::ThreadId::new(),
+                depth: 2,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            },
+        );
+    })
+    .await;
+
+    assert_eq!(
+        plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
+        &[
+            "followup_task".to_string(),
+            "interrupt_agent".to_string(),
+            "list_agents".to_string(),
+            "send_message".to_string(),
+            "wait_agent".to_string(),
+        ]
+    );
+    plan.assert_registered_lacks(&["collaboration.spawn_agent"]);
+}
+
+#[tokio::test]
 async fn tool_mode_selector_overrides_feature_flags() {
     let direct = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);

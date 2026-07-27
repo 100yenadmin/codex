@@ -1,4 +1,5 @@
 use anyhow::Context;
+use codex_config::config_toml::AgentDepthPolicyToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::OrchestratorFeatureToml;
@@ -189,6 +190,20 @@ fn save_config_resolved_fields(
     agents.default_subagent_model = config.agent_default_subagent_model.clone();
     agents.default_subagent_reasoning_effort =
         config.agent_default_subagent_reasoning_effort.clone();
+    agents.depth_routing = config
+        .agent_depth_routing
+        .iter()
+        .map(|(depth, policy)| {
+            (
+                *depth,
+                AgentDepthPolicyToml {
+                    model: policy.model.clone(),
+                    reasoning_effort: policy.reasoning_effort.clone(),
+                    leaf: policy.leaf,
+                },
+            )
+        })
+        .collect();
     agents.interrupt_message = Some(config.agent_interrupt_message_enabled);
 
     lock_config
