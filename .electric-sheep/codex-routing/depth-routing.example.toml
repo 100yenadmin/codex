@@ -1,0 +1,24 @@
+[agents]
+max_depth = 2
+max_threads = 20
+
+[agents.depth_routing."1"]
+model = "gpt-5.6-sol"
+allowed_reasoning_efforts = ["medium", "high", "xhigh"]
+fork_turns = "none"
+permission_profile = "workspace-write"
+approval_policy = "never"
+handoff_contract = "governed"
+inherit_project_instructions = true
+inherit_skill_instructions = true
+
+[agents.depth_routing."2"]
+model = "gpt-5.6-luna"
+reasoning_effort = "high"
+fork_turns = "none"
+permission_profile = "workspace-write"
+approval_policy = "never"
+handoff_contract = "governed"
+inherit_project_instructions = false
+inherit_skill_instructions = false
+leaf = true
